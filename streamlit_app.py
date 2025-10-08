@@ -156,12 +156,19 @@ with st.sidebar:
             "Minority Votes",
             "Deciding Votes",
             "Skipped Votes",
+            "Search By Term",
         ],
         index=0,
         help="Choose a predefined view of the legislator's voting record.",
     )
 
     party_focus_option = "Legislator's Party"
+    search_term = st.text_input(
+        "Search term (bill description)",
+        value="",
+        help="Filter votes whose bill description contains this text (case-insensitive). Leave blank to disable.",
+    )
+
     if filter_mode == "All Votes":
         minority_percent = 20
         min_group_votes = 0
@@ -236,6 +243,10 @@ with st.sidebar:
             help="Limit to votes where the margin between Yeas and Nays is within this amount.",
         )
         st.caption("Shows votes where the legislator's side prevailed by the specified margin or less.")
+    elif filter_mode == "Search By Term":
+        minority_percent = 20
+        min_group_votes = 0
+        st.caption("Shows votes where the bill description matches the search term.")
     else:  # Skipped Votes
         minority_percent = 20
         min_group_votes = 0
@@ -278,8 +289,21 @@ if st.button("Generate vote summary"):
     if year_selection:
         summary_df = summary_df[summary_df["Year"].isin(year_selection)].copy()
 
+    if search_term:
+        description_mask = summary_df["Bill Description"].astype(str).str.contains(
+            search_term, case=False, na=False
+        )
+        summary_df = summary_df[description_mask].copy()
+
     if summary_df.empty:
-        st.warning("No vote records found for the selected criteria.")
+        message = "No vote records found for the selected criteria."
+        if search_term:
+            message = f"No vote records found matching '{search_term}'."
+        st.warning(message)
+        st.stop()
+
+    if filter_mode == "Search By Term" and not search_term:
+        st.warning("Enter a search term to use the 'Search By Term' vote type.")
         st.stop()
 
     if filter_mode == "Skipped Votes":
