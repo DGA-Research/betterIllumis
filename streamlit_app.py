@@ -520,10 +520,8 @@ if st.button("Generate vote summary"):
     else:
         filtered_df = summary_df.copy()
 
-    filtered_df = filtered_df.drop_duplicates(subset=WORKBOOK_HEADERS).copy()
-
     filtered_count = len(filtered_df)
-    total_count = len(summary_df.drop_duplicates(subset=WORKBOOK_HEADERS))
+    total_count = len(summary_df)
 
     state_label = f" ({dataset_state})" if dataset_state else ""
     st.success(
