@@ -25,7 +25,9 @@ WORKBOOK_HEADERS = [
     "Bill Description",
     "Roll Details",
     "Person",
+    "Person Party",
     "Vote",
+    "Vote Bucket",
     "Date",
     "Result",
     "Democrat_For",
@@ -238,6 +240,7 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
         if session_target_id is None:
             continue
         found_target = True
+        target_party = party_label(people.get(session_target_id))
 
         bills = load_bills(csv_dir / "bills.csv")
         rollcalls = load_rollcalls(csv_dir / "rollcalls.csv")
@@ -258,6 +261,7 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             bill_motion = bill_desc
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")
+            vote_bucket = classify_vote(vote_desc)
             date_serial = excel_serial(roll["date"]) if roll.get("date") else ""
             status = bill.get("status", "")
             status_desc = bill.get("status_desc", "")
@@ -293,7 +297,9 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 bill_desc,
                 roll_desc,
                 target_name,
+                target_party,
                 vote_desc,
+                vote_bucket,
                 date_serial,
                 result,
             ]
@@ -310,7 +316,10 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
     if not found_target:
         raise ValueError(f"No vote records found for {target_name}.")
 
-    rows.sort(key=lambda r: (r[9], r[1], r[2]))
+    date_idx = WORKBOOK_HEADERS.index("Date")
+    session_idx = WORKBOOK_HEADERS.index("Session")
+    bill_idx = WORKBOOK_HEADERS.index("Bill Number")
+    rows.sort(key=lambda r: (r[date_idx], r[session_idx], r[bill_idx]))
     return rows
 
 
