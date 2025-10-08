@@ -98,33 +98,36 @@ if not selected_legislator:
     st.stop()
 
 with st.sidebar:
-    st.header("Minority Filters")
-    minority_percent = st.slider(
-        "Minority threshold (%)",
-        min_value=0,
-        max_value=100,
-        value=20,
-        help="Show votes where the aligned group supporting the legislator's position is at or below this percentage.",
+    st.header("Filters")
+    filter_mode = st.selectbox(
+        "Filter preset",
+        options=["All Votes", "Votes Against Party", "Minority Votes"],
+        index=0,
+        help="Choose a predefined view of the legislator's voting record.",
     )
-    min_group_votes = st.slider(
-        "Minimum votes in group",
-        min_value=0,
-        max_value=200,
-        value=5,
-        help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
-    )
-    use_party_filter = st.checkbox(
-        "Filter by party minority",
-        value=True,
-        help="Keep votes where the legislator's party voted for their position at or below the threshold.",
-    )
-    use_chamber_filter = st.checkbox(
-        "Filter by chamber minority",
-        value=False,
-        help="Keep votes where the legislator is also in the minority of the full chamber.",
-    )
-    if use_party_filter and use_chamber_filter:
-        st.caption("Votes must satisfy both the party and chamber thresholds.")
+
+    if filter_mode in {"Votes Against Party", "Minority Votes"}:
+        minority_percent = st.slider(
+            "Minority threshold (%)",
+            min_value=0,
+            max_value=100,
+            value=20,
+            help="Keep votes where the aligned group supporting the legislator's position is at or below this percentage.",
+        )
+        min_group_votes = st.slider(
+            "Minimum votes in group",
+            min_value=0,
+            max_value=200,
+            value=5,
+            help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
+        )
+        if filter_mode == "Votes Against Party":
+            st.caption("Shows votes where the legislator sided with a minority of their party.")
+        else:
+            st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
+    else:
+        minority_percent = 20
+        min_group_votes = 0
 
 if st.button("Generate vote summary"):
     with st.spinner("Processing LegiScan data..."):
@@ -180,18 +183,20 @@ if st.button("Generate vote summary"):
     metrics_df = summary_df.apply(calc_metrics, axis=1)
     summary_df = pd.concat([summary_df, metrics_df], axis=1)
 
-    threshold_ratio = minority_percent / 100.0
-    min_votes = min_group_votes
+    apply_party_filter = filter_mode in {"Votes Against Party", "Minority Votes"}
+    apply_chamber_filter = filter_mode == "Minority Votes"
+    threshold_ratio = (minority_percent / 100.0) if apply_party_filter or apply_chamber_filter else None
+    min_votes = min_group_votes if apply_party_filter or apply_chamber_filter else 0
 
     filters = []
-    if use_party_filter:
+    if apply_party_filter:
         party_condition = (
             summary_df["party_share"].notna()
             & (summary_df["party_total_votes"] >= min_votes)
             & (summary_df["party_share"] <= threshold_ratio)
         )
         filters.append(party_condition)
-    if use_chamber_filter:
+    if apply_chamber_filter:
         chamber_condition = (
             summary_df["chamber_share"].notna()
             & (summary_df["chamber_total_votes"] >= min_votes)
