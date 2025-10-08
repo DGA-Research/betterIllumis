@@ -2,7 +2,7 @@ import csv
 import datetime as dt
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, IO, Iterable, List, Optional, Union
+from typing import Dict, IO, Iterable, List, Optional, Sequence, Union
 
 from openpyxl import Workbook
 
@@ -49,6 +49,9 @@ WORKBOOK_HEADERS = [
     "Total_Not",
     "Total_Total",
 ]
+
+PathLike = Union[str, Path]
+BaseDirsInput = Union[PathLike, Sequence[PathLike]]
 
 
 def excel_serial(date_str: str) -> int:
@@ -139,10 +142,59 @@ def find_session_csv_dirs(base_dir: Path) -> List[Path]:
     return sorted(csv_dirs)
 
 
-def collect_legislator_names(base_dir: Path) -> List[str]:
+def _normalize_base_dirs(base_dirs: BaseDirsInput) -> List[Path]:
+    if isinstance(base_dirs, (str, Path)):
+        return [Path(base_dirs)]
+    return [Path(path) for path in base_dirs]
+
+
+def gather_session_csv_dirs(base_dirs: BaseDirsInput) -> List[Path]:
+    directories: List[Path] = []
+    for base_dir in _normalize_base_dirs(base_dirs):
+        directories.extend(find_session_csv_dirs(base_dir))
+    seen = set()
+    unique_dirs: List[Path] = []
+    for path in directories:
+        resolved = Path(path).resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_dirs.append(path)
+    return sorted(unique_dirs)
+
+
+def detect_state_code(csv_dir: Path) -> Optional[str]:
+    bills_path = csv_dir / "bills.csv"
+    if not bills_path.exists():
+        return None
+    for row in read_csv(bills_path):
+        state = (row.get("state") or "").strip()
+        if state:
+            return state.upper()
+    return None
+
+
+def ensure_single_state(csv_dirs: Iterable[Path]) -> Optional[str]:
+    states = {
+        state for state in (detect_state_code(csv_dir) for csv_dir in csv_dirs) if state
+    }
+    if len(states) > 1:
+        states_list = ", ".join(sorted(states))
+        raise ValueError(f"Multiple states detected in dataset: {states_list}")
+    return next(iter(states), None)
+
+
+def determine_dataset_state(base_dirs: BaseDirsInput) -> Optional[str]:
+    csv_dirs = gather_session_csv_dirs(base_dirs)
+    return ensure_single_state(csv_dirs)
+
+
+def collect_legislator_names(base_dirs: BaseDirsInput) -> List[str]:
     """Return sorted unique legislator names present in the dataset."""
+    csv_dirs = gather_session_csv_dirs(base_dirs)
+    ensure_single_state(csv_dirs)
     names = set()
-    for csv_dir in find_session_csv_dirs(base_dir):
+    for csv_dir in csv_dirs:
         people_path = csv_dir / "people.csv"
         for row in read_csv(people_path):
             name = (row.get("name") or "").strip()
@@ -173,11 +225,12 @@ def aggregate_votes(csv_dir: Path, target_id: int, people: Dict[int, Dict[str, s
     return counts, target_votes
 
 
-def collect_vote_rows(base_dir: Path, target_name: str) -> List[List]:
+def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
     rows: List[List] = []
     found_target = False
 
-    csv_dirs = find_session_csv_dirs(base_dir)
+    csv_dirs = gather_session_csv_dirs(base_dirs)
+    ensure_single_state(csv_dirs)
 
     for csv_dir in csv_dirs:
         people = load_people(csv_dir / "people.csv")
@@ -278,8 +331,8 @@ def write_workbook(
     wb.save(save_target)
 
 
-def generate_vote_export(base_dir: Path, target_name: str, output_path: Path) -> int:
-    rows = collect_vote_rows(base_dir, target_name)
+def generate_vote_export(base_dirs: BaseDirsInput, target_name: str, output_path: Path) -> int:
+    rows = collect_vote_rows(base_dirs, target_name)
     if not rows:
         raise ValueError(f"No vote records found for {target_name}.")
     write_workbook(rows, target_name, output_path)
