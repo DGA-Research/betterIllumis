@@ -1,3 +1,5 @@
+import csv
+import datetime as dt
 import io
 import tempfile
 import zipfile
@@ -13,6 +15,7 @@ from generate_kristin_robbins_votes import (
     collect_legislator_names,
     collect_vote_rows,
     determine_dataset_state,
+    gather_session_csv_dirs,
     write_workbook,
 )
 
@@ -40,6 +43,37 @@ def _collect_rows_from_zips(zip_payloads: List[bytes], legislator_name: str):
             base_dirs.append(Path(temp_dir))
         rows = collect_vote_rows(base_dirs, legislator_name)
         return rows
+
+
+def _collect_years_from_zips(zip_payloads: List[bytes]):
+    years = set()
+    with ExitStack() as stack:
+        base_dirs = []
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dirs.append(Path(temp_dir))
+        try:
+            csv_dirs = gather_session_csv_dirs(base_dirs)
+        except FileNotFoundError:
+            return []
+        for csv_dir in csv_dirs:
+            rollcalls_path = csv_dir / "rollcalls.csv"
+            if not rollcalls_path.exists():
+                continue
+            with rollcalls_path.open(encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    date_str = (row.get("date") or "").strip()
+                    if not date_str:
+                        continue
+                    try:
+                        year = dt.datetime.strptime(date_str, "%Y-%m-%d").year
+                    except ValueError:
+                        continue
+                    years.add(year)
+    return sorted(years)
 
 
 def _make_download_filename(name: str) -> str:
@@ -92,16 +126,13 @@ if not legislator_options:
 if dataset_state:
     st.caption(f"Detected state: {dataset_state}")
 
-selected_legislator = st.selectbox("Legislator", legislator_options)
-
-if not selected_legislator:
-    st.stop()
+year_options = _collect_years_from_zips(zip_payloads)
 
 with st.sidebar:
     st.header("Filters")
     filter_mode = st.selectbox(
-        "Filter preset",
-        options=["All Votes", "Votes Against Party", "Minority Votes"],
+        "Vote type",
+        options=["All Votes", "Votes Against Party", "Minority Votes", "Skipped Votes"],
         index=0,
         help="Choose a predefined view of the legislator's voting record.",
     )
@@ -132,7 +163,7 @@ with st.sidebar:
             help="Ignore vote records where the compared party cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of the chosen party.")
-    else:  # Minority Votes
+    elif filter_mode == "Minority Votes":
         minority_percent = st.slider(
             "Minority threshold (%)",
             min_value=0,
@@ -148,6 +179,25 @@ with st.sidebar:
             help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
+    else:  # Skipped Votes
+        minority_percent = 20
+        min_group_votes = 0
+        st.caption("Shows votes where the legislator did not cast a Yea or Nay.")
+
+    st.subheader("Year")
+    year_selection = st.multiselect(
+        "Year",
+        options=year_options,
+        default=year_options,
+        help="Restrict votes to selected calendar years.",
+    )
+
+    st.divider()
+    st.header("Legislator")
+    selected_legislator = st.selectbox("Legislator", legislator_options)
+
+if not selected_legislator:
+    st.stop()
 
 if st.button("Generate vote summary"):
     with st.spinner("Processing LegiScan data..."):
@@ -161,6 +211,31 @@ if st.button("Generate vote summary"):
             st.stop()
 
     summary_df = pd.DataFrame(rows, columns=WORKBOOK_HEADERS)
+
+    date_serials = pd.to_numeric(summary_df["Date"], errors="coerce")
+    summary_df["Date_dt"] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
+        date_serials, unit="D"
+    )
+    summary_df["Year"] = summary_df["Date_dt"].dt.year
+
+    if year_selection:
+        summary_df = summary_df[summary_df["Year"].isin(year_selection)].copy()
+
+    if summary_df.empty:
+        st.warning("No vote records found for the selected criteria.")
+        st.stop()
+
+    if filter_mode == "Skipped Votes":
+        vote_text = summary_df["Vote"].astype(str).str.strip().str.lower()
+        skip_mask = ~(
+            vote_text.str.startswith("yea")
+            | vote_text.str.startswith("nay")
+            | vote_text.str.startswith("aye")
+        )
+        summary_df = summary_df[skip_mask].copy()
+        if summary_df.empty:
+            st.warning("No skipped votes found for the selected criteria.")
+            st.stop()
 
     def safe_int(value):
         try:
@@ -312,11 +387,7 @@ if st.button("Generate vote summary"):
     )
 
     display_df = filtered_df.copy()
-    date_serials = pd.to_numeric(display_df["Date"], errors="coerce")
-    display_df["Date"] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
-        date_serials, unit="D"
-    )
-    display_df["Date"] = display_df["Date"].dt.date
+    display_df["Date"] = display_df["Date_dt"].dt.date
     display_df["Legislator Party"] = display_df["Person Party"].map(
         party_display_map
     ).fillna(display_df["Person Party"])
@@ -350,6 +421,7 @@ if st.button("Generate vote summary"):
                 "chamber_share",
                 "focus_party_label",
                 "Person Party Display",
+                "Date_dt",
             ],
             errors="ignore",
         ),
