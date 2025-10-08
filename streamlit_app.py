@@ -16,6 +16,7 @@ from generate_kristin_robbins_votes import (
     collect_vote_rows,
     determine_dataset_state,
     gather_session_csv_dirs,
+    collect_person_vote_map,
     write_workbook,
 )
 
@@ -43,6 +44,17 @@ def _collect_rows_from_zips(zip_payloads: List[bytes], legislator_name: str):
             base_dirs.append(Path(temp_dir))
         rows = collect_vote_rows(base_dirs, legislator_name)
         return rows
+
+
+def _collect_person_votes_from_zips(zip_payloads: List[bytes], legislator_name: str):
+    with ExitStack() as stack:
+        base_dirs = []
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dirs.append(Path(temp_dir))
+        return collect_person_vote_map(base_dirs, legislator_name)
 
 
 def _collect_years_from_zips(zip_payloads: List[bytes]):
@@ -128,11 +140,23 @@ if dataset_state:
 
 year_options = _collect_years_from_zips(zip_payloads)
 
+comparison_person = None
+comparison_label = ""
+max_vote_diff = 5
+
 with st.sidebar:
     st.header("Filters")
     filter_mode = st.selectbox(
         "Vote type",
-        options=["All Votes", "Votes Against Party", "Minority Votes", "Skipped Votes"],
+        options=[
+            "All Votes",
+            "Votes Against Party",
+            "Votes With Person",
+            "Votes Against Person",
+            "Minority Votes",
+            "Deciding Votes",
+            "Skipped Votes",
+        ],
         index=0,
         help="Choose a predefined view of the legislator's voting record.",
     )
@@ -163,6 +187,28 @@ with st.sidebar:
             help="Ignore vote records where the compared party cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of the chosen party.")
+    elif filter_mode == "Votes With Person":
+        comparison_label = "Person voting with"
+        comparison_person = st.selectbox(
+            comparison_label,
+            options=legislator_options,
+            index=0,
+            help="Select another legislator to find votes where they aligned.",
+        )
+        minority_percent = 20
+        min_group_votes = 0
+        st.caption("Shows votes where the legislator and selected colleague cast the same vote.")
+    elif filter_mode == "Votes Against Person":
+        comparison_label = "Person voting against"
+        comparison_person = st.selectbox(
+            comparison_label,
+            options=legislator_options,
+            index=0,
+            help="Select another legislator to find votes where their positions opposed each other.",
+        )
+        minority_percent = 20
+        min_group_votes = 0
+        st.caption("Shows votes where the legislator and selected colleague took opposing sides.")
     elif filter_mode == "Minority Votes":
         minority_percent = st.slider(
             "Minority threshold (%)",
@@ -179,6 +225,17 @@ with st.sidebar:
             help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
+    elif filter_mode == "Deciding Votes":
+        minority_percent = 20
+        min_group_votes = 0
+        max_vote_diff = st.slider(
+            "Maximum votes difference",
+            min_value=1,
+            max_value=50,
+            value=5,
+            help="Limit to votes where the margin between Yeas and Nays is within this amount.",
+        )
+        st.caption("Shows votes where the legislator's side prevailed by the specified margin or less.")
     else:  # Skipped Votes
         minority_percent = 20
         min_group_votes = 0
@@ -235,6 +292,66 @@ if st.button("Generate vote summary"):
         summary_df = summary_df[skip_mask].copy()
         if summary_df.empty:
             st.warning("No skipped votes found for the selected criteria.")
+            st.stop()
+
+    summary_df["Roll Call ID"] = pd.to_numeric(
+        summary_df["Roll Call ID"], errors="coerce"
+    ).astype("Int64")
+
+    if filter_mode in {"Votes With Person", "Votes Against Person"}:
+        if not comparison_person:
+            st.warning("Select a comparison legislator in the sidebar.")
+            st.stop()
+        if comparison_person == selected_legislator:
+            st.warning("Choose a different legislator for comparison.")
+            st.stop()
+
+        comparison_votes = _collect_person_votes_from_zips(
+            zip_payloads, comparison_person
+        )
+        if not comparison_votes:
+            st.warning(f"No vote records found for {comparison_person}.")
+            st.stop()
+
+        def lookup_comparison(rcid):
+            if pd.isna(rcid):
+                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
+            info = comparison_votes.get(int(rcid))
+            if not info:
+                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
+            return pd.Series(
+                {
+                    "Comparison Vote": info.get("vote_desc", ""),
+                    "Comparison Vote Bucket": info.get("vote_bucket", ""),
+                }
+            )
+
+        comparison_df = summary_df["Roll Call ID"].apply(lookup_comparison)
+        summary_df = pd.concat([summary_df, comparison_df], axis=1)
+
+        summary_df = summary_df[summary_df["Comparison Vote Bucket"] != ""].copy()
+        if summary_df.empty:
+            st.warning(
+                f"{comparison_person} has no recorded votes overlapping with {selected_legislator}."
+            )
+            st.stop()
+
+        main_bucket = summary_df["Vote Bucket"]
+        comp_bucket = summary_df["Comparison Vote Bucket"]
+
+        if filter_mode == "Votes With Person":
+            comparison_mask = main_bucket == comp_bucket
+        else:
+            comparison_mask = (
+                (main_bucket == "For") & (comp_bucket == "Against")
+            ) | ((main_bucket == "Against") & (comp_bucket == "For"))
+
+        summary_df = summary_df[comparison_mask].copy()
+        if summary_df.empty:
+            verb = "with" if filter_mode == "Votes With Person" else "against"
+            st.warning(
+                f"No votes found where {selected_legislator} voted {verb} {comparison_person}."
+            )
             st.stop()
 
     def safe_int(value):
@@ -328,6 +445,24 @@ if st.button("Generate vote summary"):
             ]
         ] = focus_metrics
 
+    deciding_condition = None
+    if filter_mode == "Deciding Votes":
+        total_for = summary_df["Total_For"].apply(safe_int)
+        total_against = summary_df["Total_Against"].apply(safe_int)
+        vote_diff = (total_for - total_against).abs()
+        winning_bucket = pd.Series(
+            "Tie", index=summary_df.index, dtype="object"
+        )
+        winning_bucket = winning_bucket.mask(total_for > total_against, "For")
+        winning_bucket = winning_bucket.mask(total_against > total_for, "Against")
+        summary_df["Vote Difference"] = vote_diff
+        summary_df["Winning Bucket"] = winning_bucket
+        deciding_condition = (
+            (vote_diff <= max_vote_diff)
+            & winning_bucket.isin(["For", "Against"])
+            & (summary_df["Vote Bucket"] == winning_bucket)
+        )
+
     apply_party_filter = filter_mode in {"Votes Against Party", "Minority Votes"}
     apply_chamber_filter = filter_mode == "Minority Votes"
     threshold_ratio = (
@@ -350,6 +485,8 @@ if st.button("Generate vote summary"):
             & (summary_df["chamber_share"] <= threshold_ratio)
         )
         filters.append(chamber_condition)
+    if filter_mode == "Deciding Votes" and deciding_condition is not None:
+        filters.append(deciding_condition)
 
     if filters:
         mask = filters[0]
@@ -392,6 +529,8 @@ if st.button("Generate vote summary"):
         party_display_map
     ).fillna(display_df["Person Party"])
     display_df["Focus Party"] = display_df["focus_party_label"]
+    if filter_mode in {"Votes With Person", "Votes Against Person"}:
+        display_df["Comparison Legislator"] = comparison_person
     display_df["Legislator Party Minority %"] = (
         display_df["party_share"] * 100
     ).round(1)
@@ -409,6 +548,8 @@ if st.button("Generate vote summary"):
             "focus_party_total_votes": "Focus Party Total Votes",
             "chamber_bucket_votes": "Chamber Votes (same position)",
             "chamber_total_votes": "Chamber Total Votes",
+            "Vote Difference": "Vote Margin",
+            "Winning Bucket": "Winning Side",
         }
     )
 
