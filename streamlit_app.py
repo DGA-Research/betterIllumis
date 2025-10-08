@@ -492,15 +492,14 @@ if st.button("Generate vote summary"):
         mask = filters[0]
         for condition in filters[1:]:
             mask &= condition
-    filtered_df = summary_df[mask].copy()
-else:
-    filtered_df = summary_df.copy()
+        filtered_df = summary_df[mask].copy()
+    else:
+        filtered_df = summary_df.copy()
 
-    # Drop repeated vote rows (keep first) before reporting/exporting.
     filtered_df = filtered_df.drop_duplicates(subset=WORKBOOK_HEADERS).copy()
 
     filtered_count = len(filtered_df)
-    total_count = len(summary_df)
+    total_count = len(summary_df.drop_duplicates(subset=WORKBOOK_HEADERS))
 
     state_label = f" ({dataset_state})" if dataset_state else ""
     st.success(
