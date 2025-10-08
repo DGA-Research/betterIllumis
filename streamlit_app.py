@@ -106,13 +106,39 @@ with st.sidebar:
         help="Choose a predefined view of the legislator's voting record.",
     )
 
-    if filter_mode in {"Votes Against Party", "Minority Votes"}:
+    party_focus_option = "Legislator's Party"
+    if filter_mode == "All Votes":
+        minority_percent = 20
+        min_group_votes = 0
+    elif filter_mode == "Votes Against Party":
+        party_focus_option = st.selectbox(
+            "Party voting against",
+            options=["Legislator's Party", "Democrat", "Republican", "Independent"],
+            index=0,
+            help="Choose which party's vote breakdown to compare against.",
+        )
         minority_percent = st.slider(
             "Minority threshold (%)",
             min_value=0,
             max_value=100,
             value=20,
-            help="Keep votes where the aligned group supporting the legislator's position is at or below this percentage.",
+            help="Keep votes where the selected party supported the legislator's position at or below this percentage.",
+        )
+        min_group_votes = st.slider(
+            "Minimum votes in group",
+            min_value=0,
+            max_value=200,
+            value=5,
+            help="Ignore vote records where the compared party cast fewer total votes than this threshold.",
+        )
+        st.caption("Shows votes where the legislator sided with a minority of the chosen party.")
+    else:  # Minority Votes
+        minority_percent = st.slider(
+            "Minority threshold (%)",
+            min_value=0,
+            max_value=100,
+            value=20,
+            help="Keep votes where the legislator's party supported their position at or below this percentage.",
         )
         min_group_votes = st.slider(
             "Minimum votes in group",
@@ -121,13 +147,7 @@ with st.sidebar:
             value=5,
             help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
         )
-        if filter_mode == "Votes Against Party":
-            st.caption("Shows votes where the legislator sided with a minority of their party.")
-        else:
-            st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
-    else:
-        minority_percent = 20
-        min_group_votes = 0
+        st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
 
 if st.button("Generate vote summary"):
     with st.spinner("Processing LegiScan data..."):
@@ -183,17 +203,69 @@ if st.button("Generate vote summary"):
     metrics_df = summary_df.apply(calc_metrics, axis=1)
     summary_df = pd.concat([summary_df, metrics_df], axis=1)
 
+    party_display_map = {
+        "Democrat": "Democrat",
+        "Republican": "Republican",
+        "Other": "Independent",
+    }
+    focus_party_lookup = {
+        "Legislator's Party": None,
+        "Democrat": "Democrat",
+        "Republican": "Republican",
+        "Independent": "Other",
+    }
+
+    summary_df["Person Party Display"] = summary_df["Person Party"].map(
+        party_display_map
+    ).fillna(summary_df["Person Party"])
+    summary_df["focus_party_label"] = summary_df["Person Party Display"]
+    summary_df["focus_party_bucket_votes"] = summary_df["party_bucket_votes"]
+    summary_df["focus_party_total_votes"] = summary_df["party_total_votes"]
+    summary_df["focus_party_share"] = summary_df["party_share"]
+
+    focus_party_key = focus_party_lookup.get(party_focus_option)
+    if filter_mode == "Votes Against Party" and focus_party_key:
+        focus_display_label = (
+            "Independent" if focus_party_key == "Other" else party_focus_option
+        )
+
+        def calc_focus_metrics(row: pd.Series):
+            bucket = row["Vote Bucket"]
+            bucket_votes = safe_int(row.get(f"{focus_party_key}_{bucket}"))
+            total_votes = safe_int(row.get(f"{focus_party_key}_Total"))
+            share = bucket_votes / total_votes if total_votes else None
+            return pd.Series(
+                {
+                    "focus_party_label": focus_display_label,
+                    "focus_party_bucket_votes": bucket_votes,
+                    "focus_party_total_votes": total_votes,
+                    "focus_party_share": share,
+                }
+            )
+
+        focus_metrics = summary_df.apply(calc_focus_metrics, axis=1)
+        summary_df[
+            [
+                "focus_party_label",
+                "focus_party_bucket_votes",
+                "focus_party_total_votes",
+                "focus_party_share",
+            ]
+        ] = focus_metrics
+
     apply_party_filter = filter_mode in {"Votes Against Party", "Minority Votes"}
     apply_chamber_filter = filter_mode == "Minority Votes"
-    threshold_ratio = (minority_percent / 100.0) if apply_party_filter or apply_chamber_filter else None
-    min_votes = min_group_votes if apply_party_filter or apply_chamber_filter else 0
+    threshold_ratio = (
+        minority_percent / 100.0 if (apply_party_filter or apply_chamber_filter) else None
+    )
+    min_votes = min_group_votes if (apply_party_filter or apply_chamber_filter) else 0
 
     filters = []
     if apply_party_filter:
         party_condition = (
-            summary_df["party_share"].notna()
-            & (summary_df["party_total_votes"] >= min_votes)
-            & (summary_df["party_share"] <= threshold_ratio)
+            summary_df["focus_party_share"].notna()
+            & (summary_df["focus_party_total_votes"] >= min_votes)
+            & (summary_df["focus_party_share"] <= threshold_ratio)
         )
         filters.append(party_condition)
     if apply_chamber_filter:
@@ -245,16 +317,25 @@ if st.button("Generate vote summary"):
         date_serials, unit="D"
     )
     display_df["Date"] = display_df["Date"].dt.date
-    display_df["Party Minority %"] = (
+    display_df["Legislator Party"] = display_df["Person Party"].map(
+        party_display_map
+    ).fillna(display_df["Person Party"])
+    display_df["Focus Party"] = display_df["focus_party_label"]
+    display_df["Legislator Party Minority %"] = (
         display_df["party_share"] * 100
+    ).round(1)
+    display_df["Focus Party Minority %"] = (
+        display_df["focus_party_share"] * 100
     ).round(1)
     display_df["Chamber Minority %"] = (
         display_df["chamber_share"] * 100
     ).round(1)
     display_df = display_df.rename(
         columns={
-            "party_bucket_votes": "Party Votes (same position)",
-            "party_total_votes": "Party Total Votes",
+            "party_bucket_votes": "Legislator Party Votes (same position)",
+            "party_total_votes": "Legislator Party Total Votes",
+            "focus_party_bucket_votes": "Focus Party Votes (same position)",
+            "focus_party_total_votes": "Focus Party Total Votes",
             "chamber_bucket_votes": "Chamber Votes (same position)",
             "chamber_total_votes": "Chamber Total Votes",
         }
@@ -265,8 +346,12 @@ if st.button("Generate vote summary"):
         display_df.drop(
             columns=[
                 "party_share",
+                "focus_party_share",
                 "chamber_share",
-            ]
+                "focus_party_label",
+                "Person Party Display",
+            ],
+            errors="ignore",
         ),
         use_container_width=True,
         height=600,
