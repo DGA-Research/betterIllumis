@@ -24,6 +24,7 @@ WORKBOOK_HEADERS = [
     "URL",
     "Bill Description",
     "Roll Details",
+    "Roll Call ID",
     "Person",
     "Person Party",
     "Vote",
@@ -227,6 +228,36 @@ def aggregate_votes(csv_dir: Path, target_id: int, people: Dict[int, Dict[str, s
     return counts, target_votes
 
 
+def collect_person_vote_map(base_dirs: BaseDirsInput, person_name: str) -> Dict[int, Dict[str, str]]:
+    """Return mapping of roll_call_id to vote details for the given person."""
+    votes: Dict[int, Dict[str, str]] = {}
+
+    csv_dirs = gather_session_csv_dirs(base_dirs)
+    ensure_single_state(csv_dirs)
+
+    for csv_dir in csv_dirs:
+        people = load_people(csv_dir / "people.csv")
+        person_id = ensure_target_id(people, person_name)
+        if person_id is None:
+            continue
+
+        votes_path = csv_dir / "votes.csv"
+        for row in read_csv(votes_path):
+            try:
+                rcid = int(row["roll_call_id"])
+                pid = int(row["people_id"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if pid != person_id:
+                continue
+            vote_desc = row.get("vote_desc", "")
+            votes[rcid] = {
+                "vote_desc": vote_desc,
+                "vote_bucket": classify_vote(vote_desc),
+            }
+    return votes
+
+
 def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
     rows: List[List] = []
     found_target = False
@@ -296,6 +327,7 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 bill_url,
                 bill_desc,
                 roll_desc,
+                rcid,
                 target_name,
                 target_party,
                 vote_desc,
