@@ -9,8 +9,13 @@ LegiScan Vote Explorer is a Streamlit application for inspecting how an individu
 - Compare a legislator against another colleague to find aligned or opposing roll calls.
 - Export the filtered results as an Excel workbook that mirrors the on-screen table.
 
-## Virtual Access
+## Virtual Access 
 1. App can be accessed virtually via: https://betterillumis-ocj7zc4myap2gpcmcrebpb.streamlit.app/
+
+## Local Prerequisites (optional)
+- Python 3.9 or newer.
+- Pip for installing Python packages.
+- LegiScan bulk download ZIP archives that include `bills.csv`, `people.csv`, `rollcalls.csv`, and `votes.csv` within a `.../csv/` folder.
 
 ## Local Installation (optional)
 1. Clone or download this repository.
@@ -22,7 +27,7 @@ LegiScan Vote Explorer is a Streamlit application for inspecting how an individu
    ```
    *`requirements.txt` pins `openpyxl`; installing the other packages alongside it keeps the app runnable.*
 
-## Running the App Locally (optional)
+## Locally Run the App (optional)
 1. From the project directory, start Streamlit:
    ```bash
    streamlit run streamlit_app.py
