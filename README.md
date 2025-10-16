@@ -10,7 +10,7 @@ LegiScan Vote Explorer is a Streamlit application for inspecting how an individu
 - Export the filtered results as an Excel workbook that mirrors the on-screen table.
 
 ## Virtual Access 
-1. App can be accessed virtually via: https://betterillumis-ocj7zc4myap2gpcmcrebpb.streamlit.app/
+- App can be accessed virtually via: https://betterillumis-ocj7zc4myap2gpcmcrebpb.streamlit.app/
 
 ## Local Prerequisites (optional)
 - Python 3.9 or newer.
