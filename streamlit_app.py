@@ -1656,7 +1656,7 @@ if generate_summary_clicked and summary_df is not None:
         fallback_state=state_code,
     )
     st.download_button(
-        label="Download filtered Excel workbook",
+        label="Download filtered Excel sheet",
         data=download_buffer.getvalue(),
         file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
