@@ -159,19 +159,38 @@ def _collect_years_from_zips(zip_payloads: List[bytes]):
     return sorted(years)
 
 
-def _slugify_label(label: str) -> str:
-    tokens = []
-    for raw in label.replace("/", " ").replace("-", " ").split():
-        cleaned = "".join(ch for ch in raw if ch.isalnum())
-        if cleaned:
-            tokens.append(cleaned.lower())
-    return "_".join(tokens)
+def _format_type_label(label: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", label or "")
+    if not tokens:
+        return "ALL"
+    return "_".join(tokens).upper()
 
 
-def _make_download_filename(name: str, view_label: str) -> str:
-    name_slug = _slugify_label(name) or "legislator"
-    view_slug = _slugify_label(view_label) or "votes"
-    return f"{name_slug}_{view_slug}.xlsx"
+def _format_name_segment(name: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", name or "")
+    if not tokens:
+        return "Legislator"
+    return "".join(token.capitalize() for token in tokens)
+
+
+def _normalize_state_segment(state_value: Optional[str]) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", (state_value or "").upper())
+    if not tokens:
+        return "UNK"
+    return "".join(tokens)
+
+
+def _make_download_filename(
+    legislator_name: str,
+    type_label: str,
+    *,
+    dataset_state: Optional[str] = None,
+    fallback_state: Optional[str] = None,
+) -> str:
+    state_segment = _normalize_state_segment(dataset_state or fallback_state)
+    name_segment = _format_name_segment(legislator_name)
+    type_segment = _format_type_label(type_label)
+    return f"{state_segment}_{name_segment}_{type_segment}.xlsx"
 
 
 def _list_local_archives() -> List[Path]:
@@ -1299,25 +1318,20 @@ if generate_summary_clicked and summary_df is not None:
     )
     export_rows = export_df.values.tolist()
 
-    view_label = filter_mode
-    if filter_mode == "Votes Against Party":
-        view_label = f"{filter_mode} {party_focus_option}"
-    elif filter_mode in {"Votes With Person", "Votes Against Person"} and comparison_person:
-        view_label = f"{filter_mode} {comparison_person}"
-    elif filter_mode == "Search By Term":
-        term_fragment = search_term if search_term else "results"
-        view_label = f"Search {term_fragment}"
-    elif filter_mode == "Deciding Votes":
-        view_label = f"{filter_mode} {max_vote_diff}"
-
     download_buffer = io.BytesIO()
     _write_single_sheet_workbook(export_headers, export_rows, selected_legislator, download_buffer)
     download_buffer.seek(0)
 
+    download_filename = _make_download_filename(
+        selected_legislator,
+        filter_mode,
+        dataset_state=dataset_state,
+        fallback_state=state_code,
+    )
     st.download_button(
         label="Download filtered Excel workbook",
         data=download_buffer.getvalue(),
-        file_name=_make_download_filename(selected_legislator, view_label),
+        file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -1470,7 +1484,12 @@ if generate_workbook_clicked and summary_df is not None:
     workbook_buffer.seek(0)
 
     st.success("Compiled vote summary workbook across key views.")
-    workbook_filename = _make_download_filename(selected_legislator, "vote views")
+    workbook_filename = _make_download_filename(
+        selected_legislator,
+        "FULL",
+        dataset_state=dataset_state,
+        fallback_state=state_code,
+    )
 
     st.download_button(
         label="Download vote summary workbook",
