@@ -464,6 +464,15 @@ def _add_hyperlink(paragraph, url: str, text: str) -> None:
     r_style = OxmlElement("w:rStyle")
     r_style.set(qn("w:val"), "Hyperlink")
     r_pr.append(r_style)
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    r_pr.append(color)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    r_pr.append(underline)
+
     new_run.append(r_pr)
 
     text_elem = OxmlElement("w:t")
@@ -875,12 +884,21 @@ def _build_bullet_summary_doc(
                     f"In {month_year}, {legislator_name} {vote_phrase} {narrative_reference}."
                 )
 
+            description_text = bill_description or meta.get("title") or ""
+            if description_text:
+                description_text = description_text.strip().rstrip(".")
+                summary_sentence = f"Bill summary: {description_text}."
+            else:
+                summary_sentence = ""
+
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
 
             paragraph = doc.add_paragraph(style="List Bullet")
             paragraph.add_run(sentence_one + " ")
             paragraph.add_run(sentence_two + " ")
+            if summary_sentence:
+                paragraph.add_run(summary_sentence + " ")
             paragraph.add_run(outcome_sentence + " ")
 
             paragraph.add_run("[")
