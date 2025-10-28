@@ -20,6 +20,7 @@ from generate_kristin_robbins_votes import (
     determine_dataset_state,
     gather_session_csv_dirs,
     collect_person_vote_map,
+    excel_serial,
 )
 
 LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
@@ -196,6 +197,177 @@ def _archive_key(name: str) -> str:
 FORBIDDEN_SHEET_CHARS = set('[]:*?/\\')
 ARCHIVE_NAME_PATTERN = re.compile(r"^[A-Z]{2}_[A-Za-z0-9_.\-]+\.zip$")
 REQUIRED_ARCHIVE_FILES = ("people.csv", "bills.csv", "rollcalls.csv", "votes.csv")
+PARTY_CODE_MAP = {
+    "D": "Democrat",
+    "DEM": "Democrat",
+    "DFL": "Democrat",
+    "R": "Republican",
+    "REP": "Republican",
+    "GOP": "Republican",
+}
+HOUSE_PREFIXES = ("HOUSE", "HJR", "HCR", "HB", "HR", "HC", "HJ", "HS", "H")
+SENATE_PREFIXES = ("SENATE", "SJR", "SCR", "SB", "SR", "SC", "SJ", "SS", "S")
+
+
+def _normalize_party_label(party_code: str) -> str:
+    code = (party_code or "").strip().upper()
+    if not code:
+        return ""
+    if code in PARTY_CODE_MAP:
+        return PARTY_CODE_MAP[code]
+    if code in {"I", "IND", "IND.", "INDP", "INDEPENDENT"}:
+        return "Other"
+    return "Other"
+
+
+def _infer_chamber_from_bill(bill_number: str) -> str:
+    token = (bill_number or "").strip().upper()
+    if not token:
+        return ""
+    for prefix in SENATE_PREFIXES:
+        if token.startswith(prefix):
+            return "Senate"
+    for prefix in HOUSE_PREFIXES:
+        if token.startswith(prefix):
+            return "House"
+    return ""
+
+
+def _format_roll_details(roll_row: dict) -> str:
+    if not roll_row:
+        return ""
+    description = (roll_row.get("description") or "").strip()
+
+    def _normalized_count(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    yea = _normalized_count(roll_row.get("yea"))
+    nay = _normalized_count(roll_row.get("nay"))
+    suffix = ""
+    if yea or nay:
+        suffix = f" ({yea}-Y {nay}-N)"
+    if description:
+        return f"{description}{suffix}"
+    return suffix.strip()
+
+
+def _build_sponsor_metadata(
+    bill_row: dict, roll_list: List[dict], sponsorship_status: str
+) -> dict:
+    session_id = str(bill_row.get("session_id", "")).strip()
+    bill_number = str(bill_row.get("bill_number", "")).strip()
+    title = (bill_row.get("title") or "").strip()
+    description = (bill_row.get("description") or "").strip()
+    url = (bill_row.get("state_link") or bill_row.get("url") or "").strip()
+    status_code = (bill_row.get("status") or "").strip()
+    status_desc = (bill_row.get("status_desc") or "").strip()
+    status_date = (bill_row.get("status_date") or "").strip()
+    last_action_date = (bill_row.get("last_action_date") or "").strip()
+    last_action = (bill_row.get("last_action") or "").strip()
+    chamber = _infer_chamber_from_bill(bill_number)
+    roll_call_id = ""
+    roll_details = ""
+    roll_date = ""
+    if roll_list:
+        first_roll = roll_list[0]
+        roll_call_id = str(first_roll.get("roll_call_id", "")).strip()
+        roll_details = _format_roll_details(first_roll)
+        roll_date = (first_roll.get("date") or "").strip()
+        if not chamber:
+            chamber_value = (first_roll.get("chamber") or "").strip()
+            chamber = chamber_value.title() if chamber_value else ""
+    if not roll_details:
+        if last_action:
+            roll_details = f"No roll call recorded - {last_action}"
+        else:
+            roll_details = "No roll call recorded"
+    date_str = roll_date or status_date or last_action_date
+    excel_date = ""
+    if date_str:
+        try:
+            excel_date = excel_serial(date_str)
+        except ValueError:
+            excel_date = ""
+    result = 1 if status_code == "4" or status_desc.lower() == "passed" else 0
+    bill_motion = title or description or bill_number
+    return {
+        "bill_id": str(bill_row.get("bill_id", "")).strip(),
+        "session_id": session_id,
+        "bill_number": bill_number,
+        "bill_title": title,
+        "bill_description": description,
+        "bill_motion": bill_motion,
+        "bill_url": url,
+        "status_code": status_code,
+        "status_desc": status_desc,
+        "status_date": status_date,
+        "last_action": last_action,
+        "last_action_date": last_action_date,
+        "roll_call_id": roll_call_id,
+        "roll_details": roll_details,
+        "roll_date": date_str,
+        "excel_date": excel_date,
+        "result": result,
+        "chamber": chamber,
+        "sponsorship_status": sponsorship_status,
+    }
+
+
+def _create_sponsor_only_rows(
+    sponsor_metadata: dict,
+    existing_keys: Set[Tuple[str, str]],
+    legislator_name: str,
+    legislator_party_label: str,
+) -> List[dict]:
+    rows: List[dict] = []
+    count_start_idx = WORKBOOK_HEADERS.index("Democrat_For")
+    party_label = legislator_party_label or "Other"
+    for idx, (key, meta) in enumerate(sponsor_metadata.items()):
+        if key in existing_keys:
+            continue
+        roll_call_value = meta.get("roll_call_id", "")
+        normalized_roll_id: Optional[int]
+        try:
+            normalized_roll_id = int(str(roll_call_value))
+        except (TypeError, ValueError):
+            normalized_roll_id = None
+        if normalized_roll_id is None:
+            bill_id_raw = meta.get("bill_id", "")
+            try:
+                normalized_roll_id = -abs(int(str(bill_id_raw)))
+            except (TypeError, ValueError):
+                normalized_roll_id = -(10**9 + idx)
+        row = {header: "" for header in WORKBOOK_HEADERS}
+        for header in WORKBOOK_HEADERS[count_start_idx:]:
+            row[header] = 0
+        row.update(
+            {
+                "Chamber": meta.get("chamber", ""),
+                "Session": meta.get("session_id", ""),
+                "Bill Number": meta.get("bill_number", ""),
+                "Bill Motion": meta.get("bill_motion", "") or meta.get("bill_title", ""),
+                "URL": meta.get("bill_url", ""),
+                "Bill Description": meta.get("bill_description", "") or meta.get("bill_title", ""),
+                "Roll Details": meta.get("roll_details", ""),
+                "Roll Call ID": normalized_roll_id,
+                "Person": legislator_name,
+                "Person Party": party_label,
+                "Vote": "No vote recorded",
+                "Vote Bucket": "Not",
+                "Date": meta.get("excel_date", ""),
+                "Result": meta.get("result", 0),
+            }
+        )
+        rows.append(
+            {
+                **row,
+                "Sponsorship Status": meta.get("sponsorship_status", ""),
+            }
+        )
+    return rows
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
@@ -226,8 +398,10 @@ def _write_single_sheet_workbook(
 
 def _collect_sponsor_lookup(
     zip_payloads: List[bytes], legislator_name: str
-) -> dict[Tuple[str, str], str]:
+) -> Tuple[dict[Tuple[str, str], str], dict[Tuple[str, str], dict], str]:
     sponsor_lookup: dict[Tuple[str, str], str] = {}
+    sponsor_metadata: dict[Tuple[str, str], dict] = {}
+    legislator_party_label: str = ""
     with ExitStack() as stack:
         base_dirs: List[Path] = []
         for payload in zip_payloads:
@@ -245,10 +419,12 @@ def _collect_sponsor_lookup(
                 people_path = csv_dir / "people.csv"
                 sponsors_path = csv_dir / "sponsors.csv"
                 bills_path = csv_dir / "bills.csv"
+                rollcalls_path = csv_dir / "rollcalls.csv"
                 if not people_path.exists() or not sponsors_path.exists():
                     continue
 
                 target_id: Optional[int] = None
+                target_party_code = ""
                 with people_path.open(encoding="utf-8") as fh:
                     reader = csv.DictReader(fh)
                     for row in reader:
@@ -258,11 +434,14 @@ def _collect_sponsor_lookup(
                                 target_id = int(row.get("people_id", ""))
                             except (TypeError, ValueError):
                                 target_id = None
+                            target_party_code = row.get("party", "")
                             break
                 if target_id is None:
                     continue
+                if not legislator_party_label:
+                    legislator_party_label = _normalize_party_label(target_party_code)
 
-                bill_map: dict[int, Tuple[str, str]] = {}
+                bill_map: dict[int, dict] = {}
                 if bills_path.exists():
                     with bills_path.open(encoding="utf-8") as fh:
                         reader = csv.DictReader(fh)
@@ -271,9 +450,18 @@ def _collect_sponsor_lookup(
                                 bill_id = int(row.get("bill_id", ""))
                             except (TypeError, ValueError):
                                 continue
-                            session_id = str(row.get("session_id", "")).strip()
-                            bill_number = str(row.get("bill_number", "")).strip()
-                            bill_map[bill_id] = (session_id, bill_number)
+                            bill_map[bill_id] = row
+
+                rollcalls_by_bill: dict[int, List[dict]] = {}
+                if rollcalls_path.exists():
+                    with rollcalls_path.open(encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            try:
+                                bill_id = int(row.get("bill_id", ""))
+                            except (TypeError, ValueError):
+                                continue
+                            rollcalls_by_bill.setdefault(bill_id, []).append(row)
 
                 with sponsors_path.open(encoding="utf-8") as fh:
                     reader = csv.DictReader(fh)
@@ -285,10 +473,11 @@ def _collect_sponsor_lookup(
                             continue
                         if people_id != target_id:
                             continue
-                        session_bill = bill_map.get(bill_id)
-                        if not session_bill:
+                        bill_row = bill_map.get(bill_id)
+                        if not bill_row:
                             continue
-                        session_id, bill_number = session_bill
+                        session_id = str(bill_row.get("session_id", "")).strip()
+                        bill_number = str(bill_row.get("bill_number", "")).strip()
                         if not bill_number:
                             continue
                         key = (session_id, bill_number)
@@ -302,13 +491,27 @@ def _collect_sponsor_lookup(
                             if position_int == 1
                             else "Cosponsor"
                         )
-                        if (
-                            sponsor_lookup.get(key) == "Primary Sponsor"
-                            and status != "Primary Sponsor"
-                        ):
+                        existing = sponsor_lookup.get(key)
+                        if existing == "Primary Sponsor" and status != "Primary Sponsor":
                             continue
-                        sponsor_lookup[key] = status
-    return sponsor_lookup
+                        if status == "Primary Sponsor" or key not in sponsor_lookup:
+                            sponsor_lookup[key] = status
+                        roll_list = rollcalls_by_bill.get(bill_id, [])
+                        if key not in sponsor_metadata:
+                            sponsor_metadata[key] = _build_sponsor_metadata(
+                                bill_row, roll_list, status
+                            )
+                        else:
+                            if (
+                                sponsor_metadata[key].get("sponsorship_status") != "Primary Sponsor"
+                                or status == "Primary Sponsor"
+                            ):
+                                sponsor_metadata[key]["sponsorship_status"] = status
+                            if roll_list and not sponsor_metadata[key].get("roll_call_id"):
+                                sponsor_metadata[key].update(
+                                    _build_sponsor_metadata(bill_row, roll_list, status)
+                                )
+    return sponsor_lookup, sponsor_metadata, legislator_party_label
 
 
 def _validate_archive_payload(payload: bytes) -> None:
@@ -368,6 +571,8 @@ def apply_filters(
     comparison_person: Optional[str] = None,
     selected_legislator: Optional[str] = None,
     zip_payloads: Optional[List[bytes]] = None,
+    sponsor_metadata: Optional[dict] = None,
+    legislator_party_label: str = "",
 ) -> Tuple[pd.DataFrame, int]:
     df = summary_df.copy()
 
@@ -399,10 +604,6 @@ def apply_filters(
         if df.empty:
             raise ValueError("No skipped votes found for the selected criteria.")
 
-    df["Roll Call ID"] = pd.to_numeric(df["Roll Call ID"], errors="coerce").astype(
-        "Int64"
-    )
-
     if filter_mode == "Sponsored/Cosponsored Bills":
         if "Sponsorship Status" in df.columns:
             sponsor_mask_series = df["Sponsorship Status"].astype(str).str.strip()
@@ -410,10 +611,29 @@ def apply_filters(
             sponsor_mask_series = pd.Series([""] * len(df), index=df.index)
         sponsor_mask = sponsor_mask_series != ""
         df = df[sponsor_mask].copy()
+        existing_keys: Set[Tuple[str, str]] = {
+            (str(session).strip(), str(bill_number).strip())
+            for session, bill_number in zip(df.get("Session", []), df.get("Bill Number", []))
+        }
+        extra_rows: List[dict] = []
+        if sponsor_metadata and selected_legislator:
+            extra_rows = _create_sponsor_only_rows(
+                sponsor_metadata,
+                existing_keys,
+                selected_legislator,
+                legislator_party_label,
+            )
+        if extra_rows:
+            df = pd.concat([df, pd.DataFrame(extra_rows)], ignore_index=True)
+        df["Sponsorship Status"] = df["Sponsorship Status"].fillna("").astype(str)
         if df.empty:
             raise ValueError(
                 "No sponsored or co-sponsored bills found for the selected legislator."
             )
+
+    df["Roll Call ID"] = pd.to_numeric(df["Roll Call ID"], errors="coerce").astype(
+        "Int64"
+    )
 
     if filter_mode in {"Votes With Person", "Votes Against Person"}:
         if not comparison_person:
@@ -681,7 +901,7 @@ def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
 
 
 def _render_state_filter():
-    st.sidebar.header("Select State and Legislator")
+    st.sidebar.header("Data Source")
     state_label = st.sidebar.selectbox(
         "State",
         options=[ALL_STATES_LABEL] + [name for name, _ in STATE_CHOICES],
@@ -863,7 +1083,7 @@ comparison_label = ""
 max_vote_diff = 5
 
 with st.sidebar:
-    #st.header("Legislator")
+    st.header("Legislator")
     selected_legislator = st.selectbox("Legislator", legislator_options)
     st.divider()
 
@@ -988,7 +1208,7 @@ with st.sidebar:
         min_group_votes = 0
         st.caption("Shows votes where the legislator did not cast a Yea or Nay.")
 
-    #st.subheader("Year")
+    st.subheader("Year")
     year_selection = st.multiselect(
         "Year",
         options=year_options,
@@ -1003,6 +1223,8 @@ generate_summary_clicked = st.button("Generate vote summary")
 generate_workbook_clicked = st.button("Generate vote summary workbook")
 
 summary_df: Optional[pd.DataFrame] = None
+sponsor_metadata: dict[Tuple[str, str], dict] = {}
+legislator_party_label: str = ""
 if generate_summary_clicked or generate_workbook_clicked:
     spinner_label = (
         "Processing LegiScan data..."
@@ -1016,7 +1238,9 @@ if generate_summary_clicked or generate_workbook_clicked:
             st.warning(str(exc))
             st.stop()
 
-    sponsor_lookup = _collect_sponsor_lookup(zip_payloads, selected_legislator)
+    sponsor_lookup, sponsor_metadata, legislator_party_label = _collect_sponsor_lookup(
+        zip_payloads, selected_legislator
+    )
     session_series = (
         summary_df["Session"].astype(str)
         if "Session" in summary_df.columns
@@ -1046,6 +1270,8 @@ if generate_summary_clicked and summary_df is not None:
             comparison_person=comparison_person,
             selected_legislator=selected_legislator,
             zip_payloads=zip_payloads,
+            sponsor_metadata=sponsor_metadata,
+            legislator_party_label=legislator_party_label,
         )
     except ValueError as exc:
         st.warning(str(exc))
@@ -1209,6 +1435,8 @@ if generate_workbook_clicked and summary_df is not None:
         "comparison_person": None,
         "selected_legislator": selected_legislator,
         "zip_payloads": zip_payloads,
+        "sponsor_metadata": sponsor_metadata,
+        "legislator_party_label": legislator_party_label,
     }
 
     for sheet_name, overrides in workbook_views:
