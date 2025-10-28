@@ -850,21 +850,30 @@ def _build_bullet_summary_doc(
             vote_phrase = _vote_phrase(row.get("Vote Bucket"))
 
             bill_motion = (row.get("Bill Motion") or "").strip()
-            if not bill_motion:
-                bill_motion = (row.get("Bill Description") or "").strip()
-            if not bill_motion:
-                bill_motion = bill_number or "this measure"
-
             bill_description = (row.get("Bill Description") or "").strip()
-            bill_reference = bill_number or bill_motion or "the bill"
+
+            primary_reference = bill_number or bill_motion or "the bill"
+            narrative_reference = primary_reference
+            if bill_motion and not primary_reference:
+                primary_reference = bill_motion
+
+            description_unique = bool(bill_description) and bill_description.lower() not in {
+                bill_motion.lower() if bill_motion else "",
+                bill_number.lower() if bill_number else "",
+            }
 
             outcome_sentence = _build_outcome_sentence(row, meta)
 
-            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {bill_motion}."
-            if bill_description:
-                sentence_two = f'In {month_year}, {legislator_name} {vote_phrase} {bill_reference}, which "{bill_description}".'
+            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
+            if description_unique:
+                sentence_two = (
+                    f'In {month_year}, {legislator_name} {vote_phrase} {narrative_reference}, '
+                    f'which "{bill_description}".'
+                )
             else:
-                sentence_two = f"In {month_year}, {legislator_name} {vote_phrase} {bill_reference}."
+                sentence_two = (
+                    f"In {month_year}, {legislator_name} {vote_phrase} {narrative_reference}."
+                )
 
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
