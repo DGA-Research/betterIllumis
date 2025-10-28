@@ -183,6 +183,93 @@ def _archive_key(name: str) -> str:
     return name.strip().lower()
 
 
+def _collect_sponsor_lookup(
+    zip_payloads: List[bytes], legislator_name: str
+) -> dict[Tuple[str, str], str]:
+    sponsor_lookup: dict[Tuple[str, str], str] = {}
+    with ExitStack() as stack:
+        base_dirs: List[Path] = []
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dirs.append(Path(temp_dir))
+
+        for base_dir in base_dirs:
+            try:
+                csv_dirs = gather_session_csv_dirs([base_dir])
+            except FileNotFoundError:
+                continue
+            for csv_dir in csv_dirs:
+                people_path = csv_dir / "people.csv"
+                sponsors_path = csv_dir / "sponsors.csv"
+                bills_path = csv_dir / "bills.csv"
+                if not people_path.exists() or not sponsors_path.exists():
+                    continue
+
+                target_id: Optional[int] = None
+                with people_path.open(encoding="utf-8") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        name = (row.get("name") or "").strip()
+                        if name == legislator_name:
+                            try:
+                                target_id = int(row.get("people_id", ""))
+                            except (TypeError, ValueError):
+                                target_id = None
+                            break
+                if target_id is None:
+                    continue
+
+                bill_map: dict[int, Tuple[str, str]] = {}
+                if bills_path.exists():
+                    with bills_path.open(encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            try:
+                                bill_id = int(row.get("bill_id", ""))
+                            except (TypeError, ValueError):
+                                continue
+                            session_id = str(row.get("session_id", "")).strip()
+                            bill_number = str(row.get("bill_number", "")).strip()
+                            bill_map[bill_id] = (session_id, bill_number)
+
+                with sponsors_path.open(encoding="utf-8") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        try:
+                            bill_id = int(row.get("bill_id", ""))
+                            people_id = int(row.get("people_id", ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if people_id != target_id:
+                            continue
+                        session_bill = bill_map.get(bill_id)
+                        if not session_bill:
+                            continue
+                        session_id, bill_number = session_bill
+                        if not bill_number:
+                            continue
+                        key = (session_id, bill_number)
+                        position_value = row.get("position", "")
+                        try:
+                            position_int = int(position_value)
+                        except (TypeError, ValueError):
+                            position_int = None
+                        status = (
+                            "Primary Sponsor"
+                            if position_int == 1
+                            else "Cosponsor"
+                        )
+                        if (
+                            sponsor_lookup.get(key) == "Primary Sponsor"
+                            and status != "Primary Sponsor"
+                        ):
+                            continue
+                        sponsor_lookup[key] = status
+    return sponsor_lookup
+
+
 def safe_int(value):
     try:
         return int(value)
@@ -247,6 +334,18 @@ def apply_filters(
     df["Roll Call ID"] = pd.to_numeric(df["Roll Call ID"], errors="coerce").astype(
         "Int64"
     )
+
+    if filter_mode == "Sponsored/Cosponsored Bills":
+        if "Sponsorship Status" in df.columns:
+            sponsor_mask_series = df["Sponsorship Status"].astype(str).str.strip()
+        else:
+            sponsor_mask_series = pd.Series([""] * len(df), index=df.index)
+        sponsor_mask = sponsor_mask_series != ""
+        df = df[sponsor_mask].copy()
+        if df.empty:
+            raise ValueError(
+                "No sponsored or co-sponsored bills found for the selected legislator."
+            )
 
     if filter_mode in {"Votes With Person", "Votes Against Person"}:
         if not comparison_person:
@@ -678,6 +777,7 @@ with st.sidebar:
             "Votes Against Person",
             "Minority Votes",
             "Deciding Votes",
+            "Sponsored/Cosponsored Bills",
             "Skipped Votes",
             "Search By Term",
         ],
@@ -774,6 +874,11 @@ with st.sidebar:
             help="Limit to votes where the margin between Yeas and Nays is within this amount.",
         )
         st.caption("Shows votes where the legislator's side prevailed by the specified margin or less.")
+    elif filter_mode == "Sponsored/Cosponsored Bills":
+        minority_percent = 20
+        min_group_votes = 0
+        max_vote_diff = 5
+        st.caption("Shows votes on bills the legislator sponsored or co-sponsored.")
     elif filter_mode == "Search By Term":
         minority_percent = 20
         min_group_votes = 0
@@ -814,6 +919,22 @@ if generate_summary_clicked or generate_workbook_clicked:
         except ValueError as exc:
             st.warning(str(exc))
             st.stop()
+
+    sponsor_lookup = _collect_sponsor_lookup(zip_payloads, selected_legislator)
+    session_series = (
+        summary_df["Session"].astype(str)
+        if "Session" in summary_df.columns
+        else pd.Series([""] * len(summary_df))
+    )
+    bill_number_series = (
+        summary_df["Bill Number"].astype(str)
+        if "Bill Number" in summary_df.columns
+        else pd.Series([""] * len(summary_df))
+    )
+    summary_df["Sponsorship Status"] = [
+        sponsor_lookup.get((session, bill_number), "")
+        for session, bill_number in zip(session_series, bill_number_series)
+    ]
 
 if generate_summary_clicked and summary_df is not None:
     try:
@@ -883,6 +1004,7 @@ if generate_summary_clicked and summary_df is not None:
             "chamber_total_votes": "Chamber Total Votes",
             "Vote Difference": "Vote Margin",
             "Winning Bucket": "Winning Side",
+            "Sponsorship Status": "Sponsorship",
         }
     )
 
@@ -946,6 +1068,7 @@ if generate_workbook_clicked and summary_df is not None:
                 "max_vote_diff": stored_deciding_max_diff,
             },
         ),
+        ("Sponsored/Cosponsored Bills", {}),
         ("Skipped Votes", {}),
     ]
     sheet_rows: List[Tuple[str, List[List]]] = []
