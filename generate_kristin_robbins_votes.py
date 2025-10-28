@@ -288,7 +288,9 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             if not bill:
                 continue
 
-            bill_desc = bill.get("description", "")
+            bill_desc = (bill.get("description") or "").strip()
+            if not bill_desc:
+                bill_desc = (bill.get("title") or "").strip()
             bill_motion = bill_desc
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")

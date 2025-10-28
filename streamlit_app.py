@@ -866,20 +866,14 @@ def _build_bullet_summary_doc(
             if bill_motion and not primary_reference:
                 primary_reference = bill_motion
 
-            description_unique = bool(bill_description) and bill_description.lower() not in {
-                bill_motion.lower() if bill_motion else "",
-                bill_number.lower() if bill_number else "",
-            }
-
             outcome_sentence = _build_outcome_sentence(row, meta)
 
             sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
 
+            description_text = bill_description or meta.get("title") or ""
             narrative_sentence = ""
-            if description_unique:
-                narrative_sentence = bill_description.strip()
-            elif not bill_description and meta.get("title"):
-                narrative_sentence = meta["title"].strip()
+            if description_text:
+                narrative_sentence = description_text.strip()
             if narrative_sentence:
                 narrative_sentence = narrative_sentence.rstrip(".") + "."
 
