@@ -7,8 +7,9 @@ import tempfile
 import zipfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set
 
+from docx import Document
 from openpyxl import Workbook
 
 import pandas as pd
@@ -391,6 +392,43 @@ def _create_sponsor_only_rows(
     return rows
 
 
+def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], Dict[str, str]]:
+    metadata: Dict[Tuple[str, str], Dict[str, str]] = {}
+    with ExitStack() as stack:
+        base_dirs: List[Path] = []
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dirs.append(Path(temp_dir))
+
+        for base_dir in base_dirs:
+            try:
+                csv_dirs = gather_session_csv_dirs([base_dir])
+            except FileNotFoundError:
+                continue
+            for csv_dir in csv_dirs:
+                bills_path = csv_dir / "bills.csv"
+                if not bills_path.exists():
+                    continue
+                with bills_path.open(encoding="utf-8") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        session_id = str(row.get("session_id", "")).strip()
+                        bill_number = str(row.get("bill_number", "")).strip()
+                        if not session_id or not bill_number:
+                            continue
+                        key = (session_id, bill_number)
+                        metadata[key] = {
+                            "last_action": (row.get("last_action") or "").strip(),
+                            "last_action_date": (row.get("last_action_date") or "").strip(),
+                            "status_desc": (row.get("status_desc") or "").strip(),
+                            "status_date": (row.get("status_date") or "").strip(),
+                            "title": (row.get("title") or "").strip(),
+                        }
+    return metadata
+
+
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
     cleaned = "".join("_" if ch in FORBIDDEN_SHEET_CHARS else ch for ch in title)
     cleaned = cleaned.strip() or "Sheet"
@@ -654,6 +692,83 @@ def prepare_summary_dataframe(rows: List[List]) -> pd.DataFrame:
     )
     summary_df["Year"] = summary_df["Date_dt"].dt.year
     return summary_df
+
+
+def _format_result_text(result_value: object) -> str:
+    numeric = safe_int(result_value)
+    if numeric == 1:
+        return "Passed"
+    if numeric == 0:
+        return "Did not pass"
+    return "Result unknown"
+
+
+def _format_latest_action(meta: Dict[str, str]) -> str:
+    last_action = (meta or {}).get("last_action") or (meta or {}).get("status_desc") or ""
+    last_action_date = (meta or {}).get("last_action_date") or (meta or {}).get("status_date") or ""
+    if not last_action:
+        return "Latest action unavailable."
+    if last_action_date:
+        return f"{last_action} ({last_action_date})"
+    return last_action
+
+
+def _build_bullet_summary_doc(
+    rows: pd.DataFrame,
+    legislator_name: str,
+    filter_label: str,
+    bill_metadata: Dict[Tuple[str, str], Dict[str, str]],
+) -> io.BytesIO:
+    doc = Document()
+    doc.add_heading(f"{legislator_name} — {filter_label}", level=1)
+
+    if rows.empty:
+        doc.add_paragraph("No records available for this selection.")
+    else:
+        for _, row in rows.iterrows():
+            session_id = str(row.get("Session") or "").strip()
+            bill_number = str(row.get("Bill Number") or "").strip()
+            meta = bill_metadata.get((session_id, bill_number), {})
+
+            vote_dt = row.get("Date_dt")
+            if pd.isna(vote_dt):
+                month_year = "Date unknown"
+                vote_date_str = "Date unknown"
+            else:
+                month_year = vote_dt.strftime("%B %Y")
+                vote_date_str = vote_dt.strftime("%Y-%m-%d")
+
+            vote_desc = (row.get("Vote") or "").strip()
+            vote_fragment = vote_desc.lower() if vote_desc else "n/a"
+
+            bill_motion = (row.get("Bill Motion") or "").strip()
+            if not bill_motion:
+                bill_motion = (row.get("Bill Description") or "").strip()
+            bill_description = (row.get("Bill Description") or "").strip()
+
+            latest_action_text = _format_latest_action(meta)
+
+            chamber = (row.get("Chamber") or "").strip() or "Unknown chamber"
+            result_text = _format_result_text(row.get("Result"))
+            last_action_date = meta.get("last_action_date") or meta.get("status_date") or "n/a"
+
+            bracket = f"[{chamber}, {bill_number or 'Unknown bill'}, {vote_date_str}; {result_text}, {last_action_date}]"
+
+            sentence_parts = [
+                f"{month_year}: {legislator_name} voted to {vote_fragment} on {bill_motion or 'this measure'}.",
+            ]
+            if bill_description:
+                sentence_parts.append(f"{bill_description}")
+            sentence_parts.append(f"Latest action: {latest_action_text}.")
+            sentence_parts.append(bracket)
+
+            paragraph_text = " ".join(sentence_parts)
+            doc.add_paragraph(paragraph_text, style="List Bullet")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 def apply_filters(
@@ -1328,6 +1443,7 @@ generate_workbook_clicked = st.button("Generate vote summary workbook")
 summary_df: Optional[pd.DataFrame] = None
 sponsor_metadata: dict[Tuple[str, str], dict] = {}
 legislator_party_label: str = ""
+bill_metadata: Dict[Tuple[str, str], Dict[str, str]] = {}
 if generate_summary_clicked or generate_workbook_clicked:
     spinner_label = (
         "Processing LegiScan data..."
@@ -1344,6 +1460,7 @@ if generate_summary_clicked or generate_workbook_clicked:
     sponsor_lookup, sponsor_metadata, legislator_party_label = _collect_sponsor_lookup(
         zip_payloads, selected_legislator
     )
+    bill_metadata = _collect_bill_metadata(zip_payloads)
     session_series = (
         summary_df["Session"].astype(str)
         if "Session" in summary_df.columns
@@ -1418,6 +1535,30 @@ if generate_summary_clicked and summary_df is not None:
         file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    if filtered_count > 0:
+        bullet_doc_buffer = _build_bullet_summary_doc(
+            filtered_df,
+            selected_legislator,
+            filter_mode,
+            bill_metadata,
+        )
+        bullet_filename = _make_download_filename(
+            selected_legislator,
+            filter_mode,
+            dataset_state=dataset_state,
+            fallback_state=state_code,
+            extension="docx",
+        )
+        st.download_button(
+            label="Download bullet summary",
+            data=bullet_doc_buffer.getvalue(),
+            file_name=bullet_filename,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="download_bullet_summary",
+        )
+    else:
+        st.info("No records available for bullet summary.")
 
     display_df = filtered_df.copy()
     display_df["Date"] = display_df["Date_dt"].dt.date
