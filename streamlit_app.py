@@ -874,31 +874,22 @@ def _build_bullet_summary_doc(
             outcome_sentence = _build_outcome_sentence(row, meta)
 
             sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
-            if description_unique:
-                sentence_two = (
-                    f'In {month_year}, {legislator_name} {vote_phrase} {narrative_reference}, '
-                    f'which "{bill_description}".'
-                )
-            else:
-                sentence_two = (
-                    f"In {month_year}, {legislator_name} {vote_phrase} {narrative_reference}."
-                )
 
-            description_text = bill_description or meta.get("title") or ""
-            if description_text:
-                description_text = description_text.strip().rstrip(".")
-                summary_sentence = f"Bill summary: {description_text}."
-            else:
-                summary_sentence = ""
+            narrative_sentence = ""
+            if description_unique:
+                narrative_sentence = bill_description.strip()
+            elif not bill_description and meta.get("title"):
+                narrative_sentence = meta["title"].strip()
+            if narrative_sentence:
+                narrative_sentence = narrative_sentence.rstrip(".") + "."
 
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
 
             paragraph = doc.add_paragraph(style="List Bullet")
             paragraph.add_run(sentence_one + " ")
-            paragraph.add_run(sentence_two + " ")
-            if summary_sentence:
-                paragraph.add_run(summary_sentence + " ")
+            if narrative_sentence:
+                paragraph.add_run(narrative_sentence + " ")
             paragraph.add_run(outcome_sentence + " ")
 
             paragraph.add_run("[")
