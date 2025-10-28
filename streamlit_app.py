@@ -887,7 +887,8 @@ def _build_bullet_summary_doc(
             vote_url = (row.get("URL") or "").strip()
 
             paragraph = doc.add_paragraph(style="List Bullet")
-            paragraph.add_run(sentence_one + " ")
+            bold_run = paragraph.add_run(sentence_one + " ")
+            bold_run.bold = True
             if narrative_sentence:
                 paragraph.add_run(narrative_sentence + " ")
             paragraph.add_run(outcome_sentence + " ")
