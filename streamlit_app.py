@@ -196,6 +196,24 @@ def _make_download_filename(
     return f"{state_segment}_{name_segment}_{type_segment}.xlsx"
 
 
+def _make_docx_filename(
+    legislator_name: str,
+    type_label: str,
+    *,
+    dataset_state: Optional[str] = None,
+    fallback_state: Optional[str] = None,
+) -> str:
+    base = _make_download_filename(
+        legislator_name,
+        type_label,
+        dataset_state=dataset_state,
+        fallback_state=fallback_state,
+    )
+    if base.lower().endswith(".xlsx"):
+        return base[:-5] + ".docx"
+    return base + ".docx"
+
+
 def _list_local_archives() -> List[Path]:
     if not LOCAL_ARCHIVE_DIR.exists():
         return []
@@ -1543,12 +1561,11 @@ if generate_summary_clicked and summary_df is not None:
             filter_mode,
             bill_metadata,
         )
-        bullet_filename = _make_download_filename(
+        bullet_filename = _make_docx_filename(
             selected_legislator,
             filter_mode,
             dataset_state=dataset_state,
             fallback_state=state_code,
-            extension="docx",
         )
         st.download_button(
             label="Download bullet summary",
