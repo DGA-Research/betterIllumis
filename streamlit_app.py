@@ -681,7 +681,7 @@ def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
 
 
 def _render_state_filter():
-    st.sidebar.header("Data Source")
+    st.sidebar.header("Select State and Legislator")
     state_label = st.sidebar.selectbox(
         "State",
         options=[ALL_STATES_LABEL] + [name for name, _ in STATE_CHOICES],
@@ -863,7 +863,7 @@ comparison_label = ""
 max_vote_diff = 5
 
 with st.sidebar:
-    st.header("Legislator")
+    #st.header("Legislator")
     selected_legislator = st.selectbox("Legislator", legislator_options)
     st.divider()
 
@@ -988,7 +988,7 @@ with st.sidebar:
         min_group_votes = 0
         st.caption("Shows votes where the legislator did not cast a Yea or Nay.")
 
-    st.subheader("Year")
+    #st.subheader("Year")
     year_selection = st.multiselect(
         "Year",
         options=year_options,
