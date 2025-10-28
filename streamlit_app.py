@@ -20,6 +20,8 @@ from generate_kristin_robbins_votes import (
     write_workbook,
 )
 
+LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
+
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
     with ExitStack() as stack:
@@ -93,6 +95,14 @@ def _make_download_filename(name: str) -> str:
     return f"{slug or 'legislator'}_votes.xlsx"
 
 
+def _list_local_archives() -> List[Path]:
+    if not LOCAL_ARCHIVE_DIR.exists():
+        return []
+    return sorted(
+        path for path in LOCAL_ARCHIVE_DIR.glob("*.zip") if path.is_file()
+    )
+
+
 st.set_page_config(page_title="LegiScan Vote Explorer", layout="wide")
 st.title("LegiScan Vote Explorer")
 st.caption(
@@ -103,16 +113,40 @@ uploaded_zips = st.file_uploader(
     "LegiScan ZIP file(s)", type="zip", accept_multiple_files=True
 )
 
-if not uploaded_zips:
-    st.info("Upload one or more ZIP files to get started.")
+local_archive_paths = _list_local_archives()
+selected_local_archives: List[Path] = []
+if local_archive_paths:
+    local_lookup = {path.name: path for path in local_archive_paths}
+    selected_local_names = st.multiselect(
+        "Bundled LegiScan archive(s)",
+        options=list(local_lookup.keys()),
+        help="Include ZIP archives stored in the repository (bulkLegiData).",
+    )
+    selected_local_archives = [
+        local_lookup[name] for name in selected_local_names
+    ]
+elif not uploaded_zips:
+    st.caption(
+        "Add additional archives under the 'bulkLegiData' directory to make them selectable here."
+    )
+
+if not uploaded_zips and not selected_local_archives:
+    st.info("Upload ZIP files or select bundled archives to get started.")
     st.stop()
 
 zip_payloads: List[bytes] = []
-for uploaded_zip in uploaded_zips:
+for uploaded_zip in uploaded_zips or []:
     try:
         zip_payloads.append(uploaded_zip.getvalue())
     except Exception as exc:  # pragma: no cover - streamlit runtime guard
         st.error(f"Failed to read uploaded file '{uploaded_zip.name}': {exc}")
+        st.stop()
+
+for archive_path in selected_local_archives:
+    try:
+        zip_payloads.append(archive_path.read_bytes())
+    except OSError as exc:
+        st.error(f"Failed to read bundled archive '{archive_path.name}': {exc}")
         st.stop()
 
 if not zip_payloads:
