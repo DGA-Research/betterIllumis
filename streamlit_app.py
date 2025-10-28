@@ -183,6 +183,23 @@ def _archive_key(name: str) -> str:
     return name.strip().lower()
 
 
+FORBIDDEN_SHEET_CHARS = set('[]:*?/\\')
+
+
+def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
+    cleaned = "".join("_" if ch in FORBIDDEN_SHEET_CHARS else ch for ch in title)
+    cleaned = cleaned.strip() or "Sheet"
+    cleaned = cleaned[:31]
+    base = cleaned
+    counter = 1
+    while cleaned in used_titles:
+        suffix = f"_{counter}"
+        cleaned = (base[: 31 - len(suffix)] + suffix) if len(base) + len(suffix) > 31 else base + suffix
+        counter += 1
+    used_titles.add(cleaned)
+    return cleaned
+
+
 def _collect_sponsor_lookup(
     zip_payloads: List[bytes], legislator_name: str
 ) -> dict[Tuple[str, str], str]:
@@ -552,13 +569,15 @@ def write_multi_sheet_workbook(
 ):
     wb = Workbook()
     first_sheet = True
+    used_titles: Set[str] = set()
     for sheet_name, rows in sheet_rows:
+        safe_title = _sanitize_sheet_title(sheet_name, used_titles)
         if first_sheet:
             ws = wb.active
-            ws.title = sheet_name
+            ws.title = safe_title
             first_sheet = False
         else:
-            ws = wb.create_sheet(title=sheet_name)
+            ws = wb.create_sheet(title=safe_title)
         ws.append(WORKBOOK_HEADERS)
         for row in rows:
             ws.append(row)
