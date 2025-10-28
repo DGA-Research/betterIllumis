@@ -786,6 +786,10 @@ comparison_label = ""
 max_vote_diff = 5
 
 with st.sidebar:
+    st.header("Legislator")
+    selected_legislator = st.selectbox("Legislator", legislator_options)
+    st.divider()
+
     st.header("Filters")
     filter_mode = st.selectbox(
         "Vote type",
@@ -915,10 +919,6 @@ with st.sidebar:
         help="Restrict votes to selected calendar years.",
     )
 
-    st.divider()
-    st.header("Legislator")
-    selected_legislator = st.selectbox("Legislator", legislator_options)
-
 if not selected_legislator:
     st.stop()
 
@@ -1026,6 +1026,14 @@ if generate_summary_clicked and summary_df is not None:
             "Sponsorship Status": "Sponsorship",
         }
     )
+    if "Sponsorship" in display_df.columns and "Person" in display_df.columns:
+        column_order = list(display_df.columns)
+        sponsorship_index = column_order.index("Sponsorship")
+        person_index = column_order.index("Person")
+        if sponsorship_index != person_index + 1:
+            sponsorship_column = column_order.pop(sponsorship_index)
+            column_order.insert(person_index + 1, sponsorship_column)
+            display_df = display_df[column_order]
 
     st.subheader("Vote Breakdown")
     st.dataframe(
