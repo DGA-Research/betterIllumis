@@ -424,6 +424,10 @@ def apply_filters(
     else:
         filtered_df = df.copy()
 
+    filtered_df = filtered_df.drop_duplicates(subset=["Roll Call ID"]).reset_index(
+        drop=True
+    )
+
     if filtered_df.empty:
         if filter_mode == "Skipped Votes":
             raise ValueError("No skipped votes found for the selected criteria.")
@@ -509,29 +513,9 @@ def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
 
 def _render_state_filter():
     st.sidebar.header("Data Source")
-    state_query = st.sidebar.text_input(
-        "State search",
-        value="",
-        placeholder="Type to filter states",
-        help="Filter the list of states shown below.",
-    )
-    normalized_query = state_query.strip().lower()
-    if normalized_query:
-        filtered_states = [
-            name
-            for name, code in STATE_CHOICES
-            if normalized_query in name.lower() or normalized_query in code.lower()
-        ]
-    else:
-        filtered_states = [name for name, _ in STATE_CHOICES]
-
-    if not filtered_states:
-        st.sidebar.info("No states match that search. Showing all states.")
-        filtered_states = [name for name, _ in STATE_CHOICES]
-
     state_label = st.sidebar.selectbox(
         "State",
-        options=[ALL_STATES_LABEL] + filtered_states,
+        options=[ALL_STATES_LABEL] + [name for name, _ in STATE_CHOICES],
         index=0,
         key="state_filter_select",
         help="Filter archives by the state's two-letter prefix (e.g., MN_...).",
