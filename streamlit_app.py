@@ -17,10 +17,11 @@ from generate_kristin_robbins_votes import (
     determine_dataset_state,
     gather_session_csv_dirs,
     collect_person_vote_map,
-    write_workbook,
+write_workbook,
 )
 
 LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
+BUNDLED_ARCHIVE_SESSION_KEY = "bundled_archive_selection"
 
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
@@ -117,9 +118,26 @@ local_archive_paths = _list_local_archives()
 selected_local_archives: List[Path] = []
 if local_archive_paths:
     local_lookup = {path.name: path for path in local_archive_paths}
+    available_names = list(local_lookup.keys())
+    existing_selection = st.session_state.get(BUNDLED_ARCHIVE_SESSION_KEY, [])
+    filtered_selection = [name for name in existing_selection if name in local_lookup]
+    if filtered_selection != existing_selection:
+        st.session_state[BUNDLED_ARCHIVE_SESSION_KEY] = filtered_selection
+    elif BUNDLED_ARCHIVE_SESSION_KEY not in st.session_state:
+        st.session_state[BUNDLED_ARCHIVE_SESSION_KEY] = []
+
+    select_all_col, clear_col = st.columns([1, 1])
+    with select_all_col:
+        if st.button("Select all bundled", use_container_width=True):
+            st.session_state[BUNDLED_ARCHIVE_SESSION_KEY] = available_names
+    with clear_col:
+        if st.button("Clear bundled", use_container_width=True):
+            st.session_state[BUNDLED_ARCHIVE_SESSION_KEY] = []
+
     selected_local_names = st.multiselect(
         "Bundled LegiScan archive(s)",
-        options=list(local_lookup.keys()),
+        options=available_names,
+        key=BUNDLED_ARCHIVE_SESSION_KEY,
         help="Include ZIP archives stored in the repository (bulkLegiData).",
     )
     selected_local_archives = [
