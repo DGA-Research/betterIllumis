@@ -695,6 +695,7 @@ with st.sidebar:
             "Party voting against",
             options=["Legislator's Party", "Democrat", "Republican", "Independent"],
             index=0,
+            key="votes_against_party_focus",
             help="Choose which party's vote breakdown to compare against.",
         )
         minority_percent = st.slider(
@@ -702,6 +703,7 @@ with st.sidebar:
             min_value=0,
             max_value=100,
             value=20,
+            key="votes_against_party_threshold",
             help="Keep votes where the selected party supported the legislator's position at or below this percentage.",
         )
         min_group_votes = st.slider(
@@ -709,6 +711,7 @@ with st.sidebar:
             min_value=0,
             max_value=200,
             value=5,
+            key="votes_against_party_min_votes",
             help="Ignore vote records where the compared party cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of the chosen party.")
@@ -718,6 +721,7 @@ with st.sidebar:
             comparison_label,
             options=legislator_options,
             index=0,
+            key="votes_with_person_select",
             help="Select another legislator to find votes where they aligned.",
         )
         minority_percent = 20
@@ -729,6 +733,7 @@ with st.sidebar:
             comparison_label,
             options=legislator_options,
             index=0,
+            key="votes_against_person_select",
             help="Select another legislator to find votes where their positions opposed each other.",
         )
         minority_percent = 20
@@ -740,6 +745,7 @@ with st.sidebar:
             min_value=0,
             max_value=100,
             value=20,
+            key="minority_votes_threshold",
             help="Keep votes where the legislator's party supported their position at or below this percentage.",
         )
         min_group_votes = st.slider(
@@ -747,6 +753,7 @@ with st.sidebar:
             min_value=0,
             max_value=200,
             value=5,
+            key="minority_votes_min_votes",
             help="Ignore vote records where the compared group cast fewer total votes than this threshold.",
         )
         st.caption("Shows votes where the legislator sided with a minority of both their party and the full chamber.")
@@ -758,6 +765,7 @@ with st.sidebar:
             min_value=1,
             max_value=50,
             value=5,
+            key="deciding_votes_max_diff",
             help="Limit to votes where the margin between Yeas and Nays is within this amount.",
         )
         st.caption("Shows votes where the legislator's side prevailed by the specified margin or less.")
@@ -891,11 +899,48 @@ if generate_summary_clicked and summary_df is not None:
     )
 
 if generate_workbook_clicked and summary_df is not None:
+    stored_votes_against_focus = st.session_state.get(
+        "votes_against_party_focus", "Legislator's Party"
+    )
+    stored_votes_against_threshold = st.session_state.get(
+        "votes_against_party_threshold", 20
+    )
+    stored_votes_against_min_votes = st.session_state.get(
+        "votes_against_party_min_votes", 5
+    )
+    stored_minority_threshold = st.session_state.get(
+        "minority_votes_threshold", 20
+    )
+    stored_minority_min_votes = st.session_state.get(
+        "minority_votes_min_votes", 5
+    )
+    stored_deciding_max_diff = st.session_state.get(
+        "deciding_votes_max_diff", 5
+    )
+
     workbook_views = [
         ("All Votes", {}),
-        ("Votes Against Party", {"min_group_votes": 5}),
-        ("Minority Votes", {"min_group_votes": 5}),
-        ("Deciding Votes", {"max_vote_diff": 5}),
+        (
+            "Votes Against Party",
+            {
+                "party_focus_option": stored_votes_against_focus,
+                "minority_percent": stored_votes_against_threshold,
+                "min_group_votes": stored_votes_against_min_votes,
+            },
+        ),
+        (
+            "Minority Votes",
+            {
+                "minority_percent": stored_minority_threshold,
+                "min_group_votes": stored_minority_min_votes,
+            },
+        ),
+        (
+            "Deciding Votes",
+            {
+                "max_vote_diff": stored_deciding_max_diff,
+            },
+        ),
         ("Skipped Votes", {}),
     ]
     sheet_rows: List[Tuple[str, List[List]]] = []
