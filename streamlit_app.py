@@ -19,7 +19,6 @@ from generate_kristin_robbins_votes import (
     determine_dataset_state,
     gather_session_csv_dirs,
     collect_person_vote_map,
-    write_workbook,
 )
 
 LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
@@ -198,6 +197,18 @@ def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
         counter += 1
     used_titles.add(cleaned)
     return cleaned
+
+
+def _write_single_sheet_workbook(
+    headers: List[str], rows: List[List], sheet_title: str, output: io.BytesIO
+) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = _sanitize_sheet_title(sheet_title, set())
+    ws.append(headers)
+    for row in rows:
+        ws.append(row)
+    wb.save(output)
 
 
 def _collect_sponsor_lookup(
@@ -565,12 +576,12 @@ def apply_filters(
 
 
 def write_multi_sheet_workbook(
-    sheet_rows: List[tuple[str, List[List]]], output: io.BytesIO
-):
+    sheet_specs: List[Tuple[str, List[str], List[List]]], output: io.BytesIO
+) -> None:
     wb = Workbook()
     first_sheet = True
     used_titles: Set[str] = set()
-    for sheet_name, rows in sheet_rows:
+    for sheet_name, headers, rows in sheet_specs:
         safe_title = _sanitize_sheet_title(sheet_name, used_titles)
         if first_sheet:
             ws = wb.active
@@ -578,7 +589,7 @@ def write_multi_sheet_workbook(
             first_sheet = False
         else:
             ws = wb.create_sheet(title=safe_title)
-        ws.append(WORKBOOK_HEADERS)
+        ws.append(headers)
         for row in rows:
             ws.append(row)
     wb.save(output)
@@ -981,12 +992,23 @@ if generate_summary_clicked and summary_df is not None:
         f"Showing {filtered_count} after filters."
     )
 
-    download_buffer = io.BytesIO()
-    write_workbook(
-        filtered_df[WORKBOOK_HEADERS].values.tolist(),
-        selected_legislator,
-        download_buffer,
+    export_headers = list(WORKBOOK_HEADERS)
+    if "Person" in export_headers:
+        person_index = export_headers.index("Person") + 1
+    else:
+        person_index = len(export_headers)
+    if "Sponsorship" not in export_headers:
+        export_headers.insert(person_index, "Sponsorship")
+
+    export_df = (
+        filtered_df.rename(columns={"Sponsorship Status": "Sponsorship"})
+        .reindex(columns=export_headers)
+        .fillna("")
     )
+    export_rows = export_df.values.tolist()
+
+    download_buffer = io.BytesIO()
+    _write_single_sheet_workbook(export_headers, export_rows, selected_legislator, download_buffer)
     download_buffer.seek(0)
 
     st.download_button(
@@ -1098,7 +1120,7 @@ if generate_workbook_clicked and summary_df is not None:
         ("Sponsored/Cosponsored Bills", {}),
         ("Skipped Votes", {}),
     ]
-    sheet_rows: List[Tuple[str, List[List]]] = []
+    sheet_rows: List[Tuple[str, List[str], List[List]]] = []
     empty_views: List[str] = []
     base_params = {
         "search_term": "",
@@ -1119,11 +1141,24 @@ if generate_workbook_clicked and summary_df is not None:
             sheet_df, _ = apply_filters(
                 summary_df, filter_mode=sheet_name, **params
             )
-            sheet_data = sheet_df[WORKBOOK_HEADERS].values.tolist()
         except ValueError:
             empty_views.append(sheet_name)
-            sheet_data = []
-        sheet_rows.append((sheet_name, sheet_data))
+            sheet_df = summary_df.iloc[0:0].copy()
+        sheet_headers = list(WORKBOOK_HEADERS)
+        if "Person" in sheet_headers:
+            person_idx = sheet_headers.index("Person") + 1
+        else:
+            person_idx = len(sheet_headers)
+        sponsorship_header = "Sponsorship"
+        if sponsorship_header not in sheet_headers:
+            sheet_headers.insert(person_idx, sponsorship_header)
+        sheet_df_export = (
+            sheet_df.rename(columns={"Sponsorship Status": sponsorship_header})
+            .reindex(columns=sheet_headers)
+            .fillna("")
+        )
+        sheet_data = sheet_df_export.values.tolist()
+        sheet_rows.append((sheet_name, sheet_headers, sheet_data))
 
     workbook_buffer = io.BytesIO()
     write_multi_sheet_workbook(sheet_rows, workbook_buffer)
