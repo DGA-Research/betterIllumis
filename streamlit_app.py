@@ -2,6 +2,7 @@ import csv
 import datetime as dt
 import io
 import re
+import subprocess
 import tempfile
 import zipfile
 from contextlib import ExitStack
@@ -548,6 +549,80 @@ def _validate_archive_payload(payload: bytes) -> None:
                 raise ValueError(f"Archive is missing required files: {missing_list} in {csv_dir.name}.")
 
 
+def _git_commit_new_archives(saved_archive_names: List[str]) -> Optional[str]:
+    if not saved_archive_names:
+        return None
+    repo_root = Path(__file__).resolve().parent
+    git_dir = repo_root / ".git"
+    if not git_dir.exists():
+        raise FileNotFoundError("Git repository not found; skipped git update.")
+
+    git_base_cmd = ["git", "-C", str(repo_root)]
+
+    status_result = subprocess.run(
+        git_base_cmd + ["diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+    )
+    if status_result.returncode != 0:
+        raise RuntimeError(status_result.stderr.strip() or status_result.stdout.strip() or "git diff failed.")
+    pre_staged = [line.strip() for line in status_result.stdout.splitlines() if line.strip()]
+    if pre_staged:
+        raise RuntimeError(
+            "Existing staged changes detected; skipped automatic git commit."
+        )
+
+    rel_paths: List[str] = []
+    for name in saved_archive_names:
+        archive_path = LOCAL_ARCHIVE_DIR / name
+        if not archive_path.exists():
+            continue
+        try:
+            rel_paths.append(str(archive_path.relative_to(repo_root)))
+        except ValueError:
+            rel_paths.append(str(archive_path))
+
+    if not rel_paths:
+        return None
+
+    try:
+        add_result = subprocess.run(
+            git_base_cmd + ["add", "--"] + rel_paths,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("Git executable not found; skipped git update.") from exc
+
+    if add_result.returncode != 0:
+        raise RuntimeError(add_result.stderr.strip() or add_result.stdout.strip() or "git add failed.")
+
+    commit_message = (
+        "Add LegiScan archive"
+        + ("s" if len(rel_paths) > 1 else "")
+        + f": {', '.join(saved_archive_names)}"
+    )
+    commit_result = subprocess.run(
+        git_base_cmd + ["commit", "-m", commit_message],
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        combined = (commit_result.stderr or commit_result.stdout or "").strip()
+        if "nothing to commit" in combined.lower():
+            return "No git changes to commit."
+        raise RuntimeError(combined or "git commit failed.")
+
+    rev_result = subprocess.run(
+        git_base_cmd + ["rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if rev_result.returncode == 0:
+        return f"Commit {rev_result.stdout.strip()}"
+    return "Committed new archives."
+
+
 def _save_uploaded_archive(filename: str, payload: bytes) -> Optional[str]:
     if not ARCHIVE_NAME_PATTERN.match(filename):
         raise ValueError("Filename must match pattern 'XX_Description.zip'.")
@@ -1048,6 +1123,15 @@ if saved_archives:
         "Added new LegiScan archive(s) to 'bulkLegiData': "
         + ", ".join(saved_archives)
     )
+    try:
+        git_feedback = _git_commit_new_archives(saved_archives)
+    except FileNotFoundError as exc:
+        st.info(str(exc))
+    except RuntimeError as exc:
+        st.warning(f"Git update failed: {exc}")
+    else:
+        if git_feedback:
+            st.caption(f"Git repository updated: {git_feedback}")
 
 if archive_save_errors:
     st.warning(
