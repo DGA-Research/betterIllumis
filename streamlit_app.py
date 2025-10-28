@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -17,11 +17,65 @@ from generate_kristin_robbins_votes import (
     determine_dataset_state,
     gather_session_csv_dirs,
     collect_person_vote_map,
-write_workbook,
+    write_workbook,
 )
 
 LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
 BUNDLED_ARCHIVE_SESSION_KEY = "bundled_archive_selection"
+ALL_STATES_LABEL = "All States"
+STATE_CHOICES = [
+    ("Alabama", "AL"),
+    ("Alaska", "AK"),
+    ("Arizona", "AZ"),
+    ("Arkansas", "AR"),
+    ("California", "CA"),
+    ("Colorado", "CO"),
+    ("Connecticut", "CT"),
+    ("Delaware", "DE"),
+    ("Florida", "FL"),
+    ("Georgia", "GA"),
+    ("Hawaii", "HI"),
+    ("Idaho", "ID"),
+    ("Illinois", "IL"),
+    ("Indiana", "IN"),
+    ("Iowa", "IA"),
+    ("Kansas", "KS"),
+    ("Kentucky", "KY"),
+    ("Louisiana", "LA"),
+    ("Maine", "ME"),
+    ("Maryland", "MD"),
+    ("Massachusetts", "MA"),
+    ("Michigan", "MI"),
+    ("Minnesota", "MN"),
+    ("Mississippi", "MS"),
+    ("Missouri", "MO"),
+    ("Montana", "MT"),
+    ("Nebraska", "NE"),
+    ("Nevada", "NV"),
+    ("New Hampshire", "NH"),
+    ("New Jersey", "NJ"),
+    ("New Mexico", "NM"),
+    ("New York", "NY"),
+    ("North Carolina", "NC"),
+    ("North Dakota", "ND"),
+    ("Ohio", "OH"),
+    ("Oklahoma", "OK"),
+    ("Oregon", "OR"),
+    ("Pennsylvania", "PA"),
+    ("Rhode Island", "RI"),
+    ("South Carolina", "SC"),
+    ("South Dakota", "SD"),
+    ("Tennessee", "TN"),
+    ("Texas", "TX"),
+    ("Utah", "UT"),
+    ("Vermont", "VT"),
+    ("Virginia", "VA"),
+    ("Washington", "WA"),
+    ("West Virginia", "WV"),
+    ("Wisconsin", "WI"),
+    ("Wyoming", "WY"),
+]
+STATE_NAME_TO_CODE = {name: code for name, code in STATE_CHOICES}
 
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
@@ -104,17 +158,97 @@ def _list_local_archives() -> List[Path]:
     )
 
 
+def _archive_matches_state(name: str, state_code: str) -> bool:
+    if not state_code:
+        return True
+    prefix = state_code.upper()
+    normalized = name.upper()
+    return normalized.startswith(prefix)
+
+
+def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
+    latest_date: Optional[dt.date] = None
+    with ExitStack() as stack:
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dir = Path(temp_dir)
+            try:
+                csv_dirs = gather_session_csv_dirs([base_dir])
+            except FileNotFoundError:
+                continue
+            for csv_dir in csv_dirs:
+                bills_path = csv_dir / "bills.csv"
+                if not bills_path.exists():
+                    continue
+                with bills_path.open(encoding="utf-8") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        date_str = (row.get("last_action_date") or "").strip()
+                        if not date_str:
+                            continue
+                        try:
+                            parsed_date = dt.datetime.strptime(
+                                date_str, "%Y-%m-%d"
+                            ).date()
+                        except ValueError:
+                            continue
+                        if latest_date is None or parsed_date > latest_date:
+                            latest_date = parsed_date
+    return latest_date
+
+
+def _render_state_filter():
+    st.sidebar.header("Data Source")
+    state_query = st.sidebar.text_input(
+        "State search",
+        value="",
+        placeholder="Type to filter states",
+        help="Filter the list of states shown below.",
+    )
+    normalized_query = state_query.strip().lower()
+    if normalized_query:
+        filtered_states = [
+            name
+            for name, code in STATE_CHOICES
+            if normalized_query in name.lower() or normalized_query in code.lower()
+        ]
+    else:
+        filtered_states = [name for name, _ in STATE_CHOICES]
+
+    if not filtered_states:
+        st.sidebar.info("No states match that search. Showing all states.")
+        filtered_states = [name for name, _ in STATE_CHOICES]
+
+    state_label = st.sidebar.selectbox(
+        "State",
+        options=[ALL_STATES_LABEL] + filtered_states,
+        index=0,
+        key="state_filter_select",
+        help="Filter archives by the state's two-letter prefix (e.g., MN_...).",
+    )
+    return state_label, STATE_NAME_TO_CODE.get(state_label)
+
+
 st.set_page_config(page_title="LegiScan Vote Explorer", layout="wide")
 st.title("LegiScan Vote Explorer")
 st.caption(
     "Upload one or more LegiScan ZIP archives from the same state, then choose a legislator to generate a consolidated vote summary."
 )
 
+state_label, state_code = _render_state_filter()
+
 uploaded_zips = st.file_uploader(
     "LegiScan ZIP file(s)", type="zip", accept_multiple_files=True
 )
 
-local_archive_paths = _list_local_archives()
+all_local_archive_paths = _list_local_archives()
+local_archive_paths = [
+    path
+    for path in all_local_archive_paths
+    if _archive_matches_state(path.name, state_code)
+] if state_code else all_local_archive_paths
 selected_local_archives: List[Path] = []
 if local_archive_paths:
     local_lookup = {path.name: path for path in local_archive_paths}
@@ -143,17 +277,26 @@ if local_archive_paths:
     selected_local_archives = [
         local_lookup[name] for name in selected_local_names
     ]
-elif not uploaded_zips:
-    st.caption(
-        "Add additional archives under the 'bulkLegiData' directory to make them selectable here."
-    )
+else:
+    if state_code and all_local_archive_paths:
+        st.caption(
+            f"No bundled archives match the selected state ({state_label})."
+        )
+    elif not uploaded_zips:
+        st.caption(
+            "Add additional archives under the 'bulkLegiData' directory to make them selectable here."
+        )
 
 if not uploaded_zips and not selected_local_archives:
     st.info("Upload ZIP files or select bundled archives to get started.")
     st.stop()
 
 zip_payloads: List[bytes] = []
+skipped_uploads: List[str] = []
 for uploaded_zip in uploaded_zips or []:
+    if state_code and not _archive_matches_state(uploaded_zip.name, state_code):
+        skipped_uploads.append(uploaded_zip.name)
+        continue
     try:
         zip_payloads.append(uploaded_zip.getvalue())
     except Exception as exc:  # pragma: no cover - streamlit runtime guard
@@ -167,9 +310,28 @@ for archive_path in selected_local_archives:
         st.error(f"Failed to read bundled archive '{archive_path.name}': {exc}")
         st.stop()
 
+if skipped_uploads:
+    st.warning(
+        f"Skipped uploads that do not match the selected state ({state_label}): "
+        + ", ".join(skipped_uploads)
+    )
+
 if not zip_payloads:
     st.info("Provide at least one ZIP archive to continue.")
     st.stop()
+
+latest_action_date: Optional[dt.date] = None
+if state_code:
+    latest_action_date = _collect_latest_action_date(zip_payloads)
+    if latest_action_date:
+        st.sidebar.caption(
+            f"Latest bill action ({state_label}): "
+            f"{latest_action_date.strftime('%B %d, %Y')}"
+        )
+    else:
+        st.sidebar.caption(
+            f"No bill action dates found for {state_label} in the selected archives."
+        )
 
 try:
     dataset_state, legislator_options = _collect_legislators_from_zips(zip_payloads)
