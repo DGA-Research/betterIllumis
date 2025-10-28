@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 
 from openpyxl import Workbook
 
@@ -177,6 +177,10 @@ def _archive_matches_state(name: str, state_code: str) -> bool:
     prefix = state_code.upper()
     normalized = name.upper()
     return normalized.startswith(prefix)
+
+
+def _archive_key(name: str) -> str:
+    return name.strip().lower()
 
 
 def safe_int(value):
@@ -597,10 +601,17 @@ if not uploaded_zips and not selected_local_archives:
 
 zip_payloads: List[bytes] = []
 skipped_uploads: List[str] = []
+duplicate_archives: List[str] = []
+seen_archive_keys: Set[str] = set()
 for uploaded_zip in uploaded_zips or []:
     if state_code and not _archive_matches_state(uploaded_zip.name, state_code):
         skipped_uploads.append(uploaded_zip.name)
         continue
+    archive_key = _archive_key(uploaded_zip.name)
+    if archive_key in seen_archive_keys:
+        duplicate_archives.append(uploaded_zip.name)
+        continue
+    seen_archive_keys.add(archive_key)
     try:
         zip_payloads.append(uploaded_zip.getvalue())
     except Exception as exc:  # pragma: no cover - streamlit runtime guard
@@ -608,6 +619,11 @@ for uploaded_zip in uploaded_zips or []:
         st.stop()
 
 for archive_path in selected_local_archives:
+    archive_key = _archive_key(archive_path.name)
+    if archive_key in seen_archive_keys:
+        duplicate_archives.append(archive_path.name)
+        continue
+    seen_archive_keys.add(archive_key)
     try:
         zip_payloads.append(archive_path.read_bytes())
     except OSError as exc:
@@ -618,6 +634,11 @@ if skipped_uploads:
     st.warning(
         f"Skipped uploads that do not match the selected state ({state_label}): "
         + ", ".join(skipped_uploads)
+    )
+
+if duplicate_archives:
+    st.warning(
+        "Skipped duplicate archives: " + ", ".join(duplicate_archives)
     )
 
 if not zip_payloads:
