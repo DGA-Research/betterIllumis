@@ -5,7 +5,9 @@ import tempfile
 import zipfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+from openpyxl import Workbook
 
 import pandas as pd
 import streamlit as st
@@ -76,6 +78,17 @@ STATE_CHOICES = [
     ("Wyoming", "WY"),
 ]
 STATE_NAME_TO_CODE = {name: code for name, code in STATE_CHOICES}
+PARTY_DISPLAY_MAP = {
+    "Democrat": "Democrat",
+    "Republican": "Republican",
+    "Other": "Independent",
+}
+FOCUS_PARTY_LOOKUP = {
+    "Legislator's Party": None,
+    "Democrat": "Democrat",
+    "Republican": "Republican",
+    "Independent": "Other",
+}
 
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
@@ -164,6 +177,297 @@ def _archive_matches_state(name: str, state_code: str) -> bool:
     prefix = state_code.upper()
     normalized = name.upper()
     return normalized.startswith(prefix)
+
+
+def safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def prepare_summary_dataframe(rows: List[List]) -> pd.DataFrame:
+    summary_df = pd.DataFrame(rows, columns=WORKBOOK_HEADERS)
+    date_serials = pd.to_numeric(summary_df["Date"], errors="coerce")
+    summary_df["Date_dt"] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
+        date_serials, unit="D"
+    )
+    summary_df["Year"] = summary_df["Date_dt"].dt.year
+    return summary_df
+
+
+def apply_filters(
+    summary_df: pd.DataFrame,
+    *,
+    filter_mode: str,
+    search_term: str = "",
+    year_selection: Optional[List[int]] = None,
+    party_focus_option: str = "Legislator's Party",
+    minority_percent: int = 20,
+    min_group_votes: int = 0,
+    max_vote_diff: int = 5,
+    comparison_person: Optional[str] = None,
+    selected_legislator: Optional[str] = None,
+    zip_payloads: Optional[List[bytes]] = None,
+) -> Tuple[pd.DataFrame, int]:
+    df = summary_df.copy()
+
+    if year_selection:
+        df = df[df["Year"].isin(year_selection)].copy()
+
+    if search_term:
+        description_mask = df["Bill Description"].astype(str).str.contains(
+            search_term, case=False, na=False
+        )
+        df = df[description_mask].copy()
+
+    if df.empty:
+        if search_term:
+            raise ValueError(f"No vote records found matching '{search_term}'.")
+        raise ValueError("No vote records found for the selected criteria.")
+
+    if filter_mode == "Search By Term" and not search_term:
+        raise ValueError("Enter a search term to use the 'Search By Term' vote type.")
+
+    if filter_mode == "Skipped Votes":
+        vote_text = df["Vote"].astype(str).str.strip().str.lower()
+        skip_mask = ~(
+            vote_text.str.startswith("yea")
+            | vote_text.str.startswith("nay")
+            | vote_text.str.startswith("aye")
+        )
+        df = df[skip_mask].copy()
+        if df.empty:
+            raise ValueError("No skipped votes found for the selected criteria.")
+
+    df["Roll Call ID"] = pd.to_numeric(df["Roll Call ID"], errors="coerce").astype(
+        "Int64"
+    )
+
+    if filter_mode in {"Votes With Person", "Votes Against Person"}:
+        if not comparison_person:
+            raise ValueError("Select a comparison legislator in the sidebar.")
+        if comparison_person == selected_legislator:
+            raise ValueError("Choose a different legislator for comparison.")
+        if zip_payloads is None:
+            raise ValueError("Comparison vote data is unavailable.")
+        comparison_votes = _collect_person_votes_from_zips(
+            zip_payloads, comparison_person
+        )
+        if not comparison_votes:
+            raise ValueError(f"No vote records found for {comparison_person}.")
+
+        def lookup_comparison(rcid):
+            if pd.isna(rcid):
+                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
+            info = comparison_votes.get(int(rcid))
+            if not info:
+                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
+            return pd.Series(
+                {
+                    "Comparison Vote": info.get("vote_desc", ""),
+                    "Comparison Vote Bucket": info.get("vote_bucket", ""),
+                }
+            )
+
+        comparison_df = df["Roll Call ID"].apply(lookup_comparison)
+        df = pd.concat([df, comparison_df], axis=1)
+        df = df[df["Comparison Vote Bucket"] != ""].copy()
+        if df.empty:
+            verb = "with" if filter_mode == "Votes With Person" else "against"
+            raise ValueError(
+                f"No votes found where {selected_legislator} voted {verb} {comparison_person}."
+            )
+
+        main_bucket = df["Vote Bucket"]
+        comp_bucket = df["Comparison Vote Bucket"]
+
+        if filter_mode == "Votes With Person":
+            comparison_mask = main_bucket == comp_bucket
+        else:
+            comparison_mask = (
+                (main_bucket == "For") & (comp_bucket == "Against")
+            ) | ((main_bucket == "Against") & (comp_bucket == "For"))
+
+        df = df[comparison_mask].copy()
+        if df.empty:
+            verb = "with" if filter_mode == "Votes With Person" else "against"
+            raise ValueError(
+                f"No votes found where {selected_legislator} voted {verb} {comparison_person}."
+            )
+
+    def calc_metrics(row: pd.Series):
+        bucket = row["Vote Bucket"]
+        party = row["Person Party"]
+        metrics = {
+            "party_bucket_votes": None,
+            "party_total_votes": None,
+            "party_share": None,
+            "chamber_bucket_votes": None,
+            "chamber_total_votes": None,
+            "chamber_share": None,
+        }
+
+        if party:
+            party_bucket_col = f"{party}_{bucket}"
+            party_total_col = f"{party}_Total"
+            party_bucket = safe_int(row.get(party_bucket_col))
+            party_total = safe_int(row.get(party_total_col))
+            metrics["party_bucket_votes"] = party_bucket
+            metrics["party_total_votes"] = party_total
+            metrics["party_share"] = (
+                party_bucket / party_total if party_total else None
+            )
+
+        chamber_bucket = safe_int(row.get(f"Total_{bucket}"))
+        chamber_total = safe_int(row.get("Total_Total"))
+        metrics["chamber_bucket_votes"] = chamber_bucket
+        metrics["chamber_total_votes"] = chamber_total
+        metrics["chamber_share"] = (
+            chamber_bucket / chamber_total if chamber_total else None
+        )
+        return pd.Series(metrics)
+
+    metrics_df = df.apply(calc_metrics, axis=1)
+    df = pd.concat([df, metrics_df], axis=1)
+
+    df["Person Party Display"] = df["Person Party"].map(PARTY_DISPLAY_MAP).fillna(
+        df["Person Party"]
+    )
+    df["focus_party_label"] = df["Person Party Display"]
+    df["focus_party_bucket_votes"] = df["party_bucket_votes"]
+    df["focus_party_total_votes"] = df["party_total_votes"]
+    df["focus_party_share"] = df["party_share"]
+
+    focus_party_key = FOCUS_PARTY_LOOKUP.get(party_focus_option)
+    if filter_mode == "Votes Against Party" and focus_party_key:
+        focus_display_label = (
+            "Independent" if focus_party_key == "Other" else party_focus_option
+        )
+
+        def calc_focus_metrics(row: pd.Series):
+            bucket = row["Vote Bucket"]
+            bucket_votes = safe_int(row.get(f"{focus_party_key}_{bucket}"))
+            total_votes = safe_int(row.get(f"{focus_party_key}_Total"))
+            share = bucket_votes / total_votes if total_votes else None
+            return pd.Series(
+                {
+                    "focus_party_label": focus_display_label,
+                    "focus_party_bucket_votes": bucket_votes,
+                    "focus_party_total_votes": total_votes,
+                    "focus_party_share": share,
+                }
+            )
+
+        focus_metrics = df.apply(calc_focus_metrics, axis=1)
+        df[
+            [
+                "focus_party_label",
+                "focus_party_bucket_votes",
+                "focus_party_total_votes",
+                "focus_party_share",
+            ]
+        ] = focus_metrics
+
+    deciding_condition = None
+    if filter_mode == "Deciding Votes":
+        total_for = df["Total_For"].apply(safe_int)
+        total_against = df["Total_Against"].apply(safe_int)
+        vote_diff = (total_for - total_against).abs()
+        winning_bucket = pd.Series("Tie", index=df.index, dtype="object")
+        winning_bucket = winning_bucket.mask(total_for > total_against, "For")
+        winning_bucket = winning_bucket.mask(total_against > total_for, "Against")
+        df["Vote Difference"] = vote_diff
+        df["Winning Bucket"] = winning_bucket
+        deciding_condition = (
+            (vote_diff <= max_vote_diff)
+            & winning_bucket.isin(["For", "Against"])
+            & (df["Vote Bucket"] == winning_bucket)
+        )
+
+    apply_party_filter = filter_mode in {"Votes Against Party", "Minority Votes"}
+    apply_chamber_filter = filter_mode == "Minority Votes"
+    threshold_ratio = (
+        minority_percent / 100.0 if (apply_party_filter or apply_chamber_filter) else None
+    )
+    min_votes = min_group_votes if (apply_party_filter or apply_chamber_filter) else 0
+
+    filters = []
+    if apply_party_filter:
+        party_condition = (
+            df["focus_party_share"].notna()
+            & (df["focus_party_total_votes"] >= min_votes)
+            & (df["focus_party_share"] <= threshold_ratio)
+        )
+        filters.append(party_condition)
+    if apply_chamber_filter:
+        chamber_condition = (
+            df["chamber_share"].notna()
+            & (df["chamber_total_votes"] >= min_votes)
+            & (df["chamber_share"] <= threshold_ratio)
+        )
+        filters.append(chamber_condition)
+    if filter_mode == "Deciding Votes" and deciding_condition is not None:
+        filters.append(deciding_condition)
+
+    pre_filter_count = len(df)
+
+    if filters:
+        mask = filters[0]
+        for condition in filters[1:]:
+            mask &= condition
+        filtered_df = df[mask].copy()
+    else:
+        filtered_df = df.copy()
+
+    if filtered_df.empty:
+        if filter_mode == "Skipped Votes":
+            raise ValueError("No skipped votes found for the selected criteria.")
+        if filter_mode == "Votes Against Party":
+            raise ValueError(
+                "No votes found where the legislator sided with the specified minority."
+            )
+        if filter_mode == "Minority Votes":
+            raise ValueError(
+                "No votes found where the legislator and chamber were both in the minority."
+            )
+        if filter_mode == "Deciding Votes":
+            raise ValueError(
+                "No votes found within the specified deciding vote margin."
+            )
+        raise ValueError("No vote records found for the selected criteria.")
+
+    return filtered_df, pre_filter_count
+
+
+def write_multi_sheet_workbook(
+    sheet_rows: List[tuple[str, List[List]]], output: io.BytesIO
+):
+    wb = Workbook()
+    first_sheet = True
+    for sheet_name, rows in sheet_rows:
+        if first_sheet:
+            ws = wb.active
+            ws.title = sheet_name
+            first_sheet = False
+        else:
+            ws = wb.create_sheet(title=sheet_name)
+        ws.append(WORKBOOK_HEADERS)
+        for row in rows:
+            ws.append(row)
+    wb.save(output)
+
+
+def build_summary_dataframe(
+    zip_payloads: List[bytes], legislator_name: str
+) -> pd.DataFrame:
+    try:
+        rows = _collect_rows_from_zips(zip_payloads, legislator_name)
+    except zipfile.BadZipFile:
+        raise ValueError("One of the uploads could not be read as a ZIP archive.")
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    return prepare_summary_dataframe(rows)
 
 
 def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
@@ -481,270 +785,48 @@ with st.sidebar:
 if not selected_legislator:
     st.stop()
 
-if st.button("Generate vote summary"):
-    with st.spinner("Processing LegiScan data..."):
+generate_summary_clicked = st.button("Generate vote summary")
+generate_workbook_clicked = st.button("Generate vote summary workbook")
+
+summary_df: Optional[pd.DataFrame] = None
+if generate_summary_clicked or generate_workbook_clicked:
+    spinner_label = (
+        "Processing LegiScan data..."
+        if generate_summary_clicked
+        else "Compiling workbook across vote types..."
+    )
+    with st.spinner(spinner_label):
         try:
-            rows = _collect_rows_from_zips(zip_payloads, selected_legislator)
-        except zipfile.BadZipFile:
-            st.error("One of the uploads could not be read as a ZIP archive.")
-            st.stop()
+            summary_df = build_summary_dataframe(zip_payloads, selected_legislator)
         except ValueError as exc:
             st.warning(str(exc))
             st.stop()
 
-    summary_df = pd.DataFrame(rows, columns=WORKBOOK_HEADERS)
-
-    date_serials = pd.to_numeric(summary_df["Date"], errors="coerce")
-    summary_df["Date_dt"] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
-        date_serials, unit="D"
-    )
-    summary_df["Year"] = summary_df["Date_dt"].dt.year
-
-    if year_selection:
-        summary_df = summary_df[summary_df["Year"].isin(year_selection)].copy()
-
-    if search_term:
-        description_mask = summary_df["Bill Description"].astype(str).str.contains(
-            search_term, case=False, na=False
+if generate_summary_clicked and summary_df is not None:
+    try:
+        filtered_df, total_count = apply_filters(
+            summary_df,
+            filter_mode=filter_mode,
+            search_term=search_term,
+            year_selection=year_selection,
+            party_focus_option=party_focus_option,
+            minority_percent=minority_percent,
+            min_group_votes=min_group_votes,
+            max_vote_diff=max_vote_diff,
+            comparison_person=comparison_person,
+            selected_legislator=selected_legislator,
+            zip_payloads=zip_payloads,
         )
-        summary_df = summary_df[description_mask].copy()
-
-    if summary_df.empty:
-        message = "No vote records found for the selected criteria."
-        if search_term:
-            message = f"No vote records found matching '{search_term}'."
-        st.warning(message)
+    except ValueError as exc:
+        st.warning(str(exc))
         st.stop()
-
-    if filter_mode == "Search By Term" and not search_term:
-        st.warning("Enter a search term to use the 'Search By Term' vote type.")
-        st.stop()
-
-    if filter_mode == "Skipped Votes":
-        vote_text = summary_df["Vote"].astype(str).str.strip().str.lower()
-        skip_mask = ~(
-            vote_text.str.startswith("yea")
-            | vote_text.str.startswith("nay")
-            | vote_text.str.startswith("aye")
-        )
-        summary_df = summary_df[skip_mask].copy()
-        if summary_df.empty:
-            st.warning("No skipped votes found for the selected criteria.")
-            st.stop()
-
-    summary_df["Roll Call ID"] = pd.to_numeric(
-        summary_df["Roll Call ID"], errors="coerce"
-    ).astype("Int64")
-
-    if filter_mode in {"Votes With Person", "Votes Against Person"}:
-        if not comparison_person:
-            st.warning("Select a comparison legislator in the sidebar.")
-            st.stop()
-        if comparison_person == selected_legislator:
-            st.warning("Choose a different legislator for comparison.")
-            st.stop()
-
-        comparison_votes = _collect_person_votes_from_zips(
-            zip_payloads, comparison_person
-        )
-        if not comparison_votes:
-            st.warning(f"No vote records found for {comparison_person}.")
-            st.stop()
-
-        def lookup_comparison(rcid):
-            if pd.isna(rcid):
-                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
-            info = comparison_votes.get(int(rcid))
-            if not info:
-                return pd.Series({"Comparison Vote": "", "Comparison Vote Bucket": ""})
-            return pd.Series(
-                {
-                    "Comparison Vote": info.get("vote_desc", ""),
-                    "Comparison Vote Bucket": info.get("vote_bucket", ""),
-                }
-            )
-
-        comparison_df = summary_df["Roll Call ID"].apply(lookup_comparison)
-        summary_df = pd.concat([summary_df, comparison_df], axis=1)
-
-        summary_df = summary_df[summary_df["Comparison Vote Bucket"] != ""].copy()
-        if summary_df.empty:
-            st.warning(
-                f"{comparison_person} has no recorded votes overlapping with {selected_legislator}."
-            )
-            st.stop()
-
-        main_bucket = summary_df["Vote Bucket"]
-        comp_bucket = summary_df["Comparison Vote Bucket"]
-
-        if filter_mode == "Votes With Person":
-            comparison_mask = main_bucket == comp_bucket
-        else:
-            comparison_mask = (
-                (main_bucket == "For") & (comp_bucket == "Against")
-            ) | ((main_bucket == "Against") & (comp_bucket == "For"))
-
-        summary_df = summary_df[comparison_mask].copy()
-        if summary_df.empty:
-            verb = "with" if filter_mode == "Votes With Person" else "against"
-            st.warning(
-                f"No votes found where {selected_legislator} voted {verb} {comparison_person}."
-            )
-            st.stop()
-
-    def safe_int(value):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-
-    def calc_metrics(row: pd.Series):
-        bucket = row["Vote Bucket"]
-        party = row["Person Party"]
-        metrics = {
-            "party_bucket_votes": None,
-            "party_total_votes": None,
-            "party_share": None,
-            "chamber_bucket_votes": None,
-            "chamber_total_votes": None,
-            "chamber_share": None,
-        }
-
-        if party:
-            party_bucket_col = f"{party}_{bucket}"
-            party_total_col = f"{party}_Total"
-            party_bucket = safe_int(row.get(party_bucket_col))
-            party_total = safe_int(row.get(party_total_col))
-            metrics["party_bucket_votes"] = party_bucket
-            metrics["party_total_votes"] = party_total
-            metrics["party_share"] = (
-                party_bucket / party_total if party_total else None
-            )
-
-        chamber_bucket = safe_int(row.get(f"Total_{bucket}"))
-        chamber_total = safe_int(row.get("Total_Total"))
-        metrics["chamber_bucket_votes"] = chamber_bucket
-        metrics["chamber_total_votes"] = chamber_total
-        metrics["chamber_share"] = (
-            chamber_bucket / chamber_total if chamber_total else None
-        )
-        return pd.Series(metrics)
-
-    metrics_df = summary_df.apply(calc_metrics, axis=1)
-    summary_df = pd.concat([summary_df, metrics_df], axis=1)
-
-    party_display_map = {
-        "Democrat": "Democrat",
-        "Republican": "Republican",
-        "Other": "Independent",
-    }
-    focus_party_lookup = {
-        "Legislator's Party": None,
-        "Democrat": "Democrat",
-        "Republican": "Republican",
-        "Independent": "Other",
-    }
-
-    summary_df["Person Party Display"] = summary_df["Person Party"].map(
-        party_display_map
-    ).fillna(summary_df["Person Party"])
-    summary_df["focus_party_label"] = summary_df["Person Party Display"]
-    summary_df["focus_party_bucket_votes"] = summary_df["party_bucket_votes"]
-    summary_df["focus_party_total_votes"] = summary_df["party_total_votes"]
-    summary_df["focus_party_share"] = summary_df["party_share"]
-
-    focus_party_key = focus_party_lookup.get(party_focus_option)
-    if filter_mode == "Votes Against Party" and focus_party_key:
-        focus_display_label = (
-            "Independent" if focus_party_key == "Other" else party_focus_option
-        )
-
-        def calc_focus_metrics(row: pd.Series):
-            bucket = row["Vote Bucket"]
-            bucket_votes = safe_int(row.get(f"{focus_party_key}_{bucket}"))
-            total_votes = safe_int(row.get(f"{focus_party_key}_Total"))
-            share = bucket_votes / total_votes if total_votes else None
-            return pd.Series(
-                {
-                    "focus_party_label": focus_display_label,
-                    "focus_party_bucket_votes": bucket_votes,
-                    "focus_party_total_votes": total_votes,
-                    "focus_party_share": share,
-                }
-            )
-
-        focus_metrics = summary_df.apply(calc_focus_metrics, axis=1)
-        summary_df[
-            [
-                "focus_party_label",
-                "focus_party_bucket_votes",
-                "focus_party_total_votes",
-                "focus_party_share",
-            ]
-        ] = focus_metrics
-
-    deciding_condition = None
-    if filter_mode == "Deciding Votes":
-        total_for = summary_df["Total_For"].apply(safe_int)
-        total_against = summary_df["Total_Against"].apply(safe_int)
-        vote_diff = (total_for - total_against).abs()
-        winning_bucket = pd.Series(
-            "Tie", index=summary_df.index, dtype="object"
-        )
-        winning_bucket = winning_bucket.mask(total_for > total_against, "For")
-        winning_bucket = winning_bucket.mask(total_against > total_for, "Against")
-        summary_df["Vote Difference"] = vote_diff
-        summary_df["Winning Bucket"] = winning_bucket
-        deciding_condition = (
-            (vote_diff <= max_vote_diff)
-            & winning_bucket.isin(["For", "Against"])
-            & (summary_df["Vote Bucket"] == winning_bucket)
-        )
-
-    apply_party_filter = filter_mode in {"Votes Against Party", "Minority Votes"}
-    apply_chamber_filter = filter_mode == "Minority Votes"
-    threshold_ratio = (
-        minority_percent / 100.0 if (apply_party_filter or apply_chamber_filter) else None
-    )
-    min_votes = min_group_votes if (apply_party_filter or apply_chamber_filter) else 0
-
-    filters = []
-    if apply_party_filter:
-        party_condition = (
-            summary_df["focus_party_share"].notna()
-            & (summary_df["focus_party_total_votes"] >= min_votes)
-            & (summary_df["focus_party_share"] <= threshold_ratio)
-        )
-        filters.append(party_condition)
-    if apply_chamber_filter:
-        chamber_condition = (
-            summary_df["chamber_share"].notna()
-            & (summary_df["chamber_total_votes"] >= min_votes)
-            & (summary_df["chamber_share"] <= threshold_ratio)
-        )
-        filters.append(chamber_condition)
-    if filter_mode == "Deciding Votes" and deciding_condition is not None:
-        filters.append(deciding_condition)
-
-    if filters:
-        mask = filters[0]
-        for condition in filters[1:]:
-            mask &= condition
-        filtered_df = summary_df[mask].copy()
-    else:
-        filtered_df = summary_df.copy()
 
     filtered_count = len(filtered_df)
-    total_count = len(summary_df)
-
     state_label = f" ({dataset_state})" if dataset_state else ""
     st.success(
         f"Compiled {total_count} votes for {selected_legislator}{state_label}. "
         f"Showing {filtered_count} after filters."
     )
-
-    if filtered_count == 0:
-        st.warning("No vote records matched the current filters.")
 
     download_buffer = io.BytesIO()
     write_workbook(
@@ -764,7 +846,7 @@ if st.button("Generate vote summary"):
     display_df = filtered_df.copy()
     display_df["Date"] = display_df["Date_dt"].dt.date
     display_df["Legislator Party"] = display_df["Person Party"].map(
-        party_display_map
+        PARTY_DISPLAY_MAP
     ).fillna(display_df["Person Party"])
     display_df["Focus Party"] = display_df["focus_party_label"]
     if filter_mode in {"Votes With Person", "Votes Against Person"}:
@@ -807,3 +889,62 @@ if st.button("Generate vote summary"):
         use_container_width=True,
         height=600,
     )
+
+if generate_workbook_clicked and summary_df is not None:
+    workbook_views = [
+        ("All Votes", {}),
+        ("Votes Against Party", {"min_group_votes": 5}),
+        ("Minority Votes", {"min_group_votes": 5}),
+        ("Deciding Votes", {"max_vote_diff": 5}),
+        ("Skipped Votes", {}),
+    ]
+    sheet_rows: List[Tuple[str, List[List]]] = []
+    empty_views: List[str] = []
+    base_params = {
+        "search_term": "",
+        "year_selection": None,
+        "party_focus_option": "Legislator's Party",
+        "minority_percent": 20,
+        "min_group_votes": 0,
+        "max_vote_diff": 5,
+        "comparison_person": None,
+        "selected_legislator": selected_legislator,
+        "zip_payloads": zip_payloads,
+    }
+
+    for sheet_name, overrides in workbook_views:
+        params = base_params.copy()
+        params.update(overrides)
+        try:
+            sheet_df, _ = apply_filters(
+                summary_df, filter_mode=sheet_name, **params
+            )
+            sheet_data = sheet_df[WORKBOOK_HEADERS].values.tolist()
+        except ValueError:
+            empty_views.append(sheet_name)
+            sheet_data = []
+        sheet_rows.append((sheet_name, sheet_data))
+
+    workbook_buffer = io.BytesIO()
+    write_multi_sheet_workbook(sheet_rows, workbook_buffer)
+    workbook_buffer.seek(0)
+
+    st.success("Compiled vote summary workbook across key views.")
+    base_filename = _make_download_filename(selected_legislator)
+    if base_filename.endswith("_votes.xlsx"):
+        workbook_filename = base_filename.replace("_votes.xlsx", "_vote_views.xlsx")
+    else:
+        workbook_filename = f"{Path(base_filename).stem}_vote_views.xlsx"
+
+    st.download_button(
+        label="Download vote summary workbook",
+        data=workbook_buffer.getvalue(),
+        file_name=workbook_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_multi_view_workbook",
+    )
+
+    if empty_views:
+        st.info(
+            "No data available for: " + ", ".join(empty_views)
+        )
