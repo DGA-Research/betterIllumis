@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE
 from openpyxl import Workbook
 
 import pandas as pd
@@ -447,6 +450,87 @@ def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], D
     return metadata
 
 
+def _add_hyperlink(paragraph, url: str, text: str) -> None:
+    if not url:
+        paragraph.add_run(text)
+        return
+    part = paragraph.part
+    r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    r_style = OxmlElement("w:rStyle")
+    r_style.set(qn("w:val"), "Hyperlink")
+    r_pr.append(r_style)
+    new_run.append(r_pr)
+
+    text_elem = OxmlElement("w:t")
+    text_elem.text = text
+    new_run.append(text_elem)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+
+
+def _vote_phrase(vote_bucket: str) -> str:
+    mapping = {
+        "For": "voted for",
+        "Against": "voted against",
+        "Not": "did not vote on",
+        "Absent": "abstained from voting on",
+    }
+    return mapping.get((vote_bucket or "").title(), "took action on")
+
+
+def _format_vote_total(row: pd.Series) -> str:
+    total_for = safe_int(row.get("Total_For"))
+    total_against = safe_int(row.get("Total_Against"))
+    if total_for == 0 and total_against == 0:
+        return ""
+    return f"({total_for}-{total_against})"
+
+
+def _describe_followup(meta: Dict[str, str]) -> str:
+    text = ((meta or {}).get("last_action") or (meta or {}).get("status_desc") or "").lower()
+    if not text:
+        return "and is awaiting further action."
+    keywords_signed = ["signed", "approved by governor", "chaptered", "enacted", "act no."]
+    keywords_veto = ["veto"]
+    keywords_failed = ["failed", "died", "rejected", "indefinitely postponed", "did not pass", "lost"]
+
+    if any(keyword in text for keyword in keywords_signed):
+        return "and was signed by the Governor."
+    if any(keyword in text for keyword in keywords_veto):
+        return "and was vetoed by the Governor."
+    if any(keyword in text for keyword in keywords_failed):
+        return "and failed to advance in the other chamber."
+    if "transmitted to governor" in text or "sent to governor" in text:
+        return "and was sent to the Governor."
+    return "and is awaiting further action."
+
+
+def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
+    bill_number = (row.get("Bill Number") or "The bill").strip() or "The bill"
+    chamber = (row.get("Chamber") or "the chamber").strip() or "the chamber"
+    result_text = _format_result_text(row.get("Result"))
+    vote_total = _format_vote_total(row)
+
+    if result_text == "Passed":
+        clause = f"passed in the {chamber}"
+    elif result_text == "Did not pass":
+        clause = f"failed to advance in the {chamber}"
+    else:
+        clause = f"had an undetermined result in the {chamber}"
+
+    if vote_total:
+        clause = f"{clause} {vote_total}"
+
+    followup = _describe_followup(meta)
+    return f"{bill_number} {clause} {followup}".strip()
+
+
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
     cleaned = "".join("_" if ch in FORBIDDEN_SHEET_CHARS else ch for ch in title)
     cleaned = cleaned.strip() or "Sheet"
@@ -736,9 +820,14 @@ def _build_bullet_summary_doc(
     legislator_name: str,
     filter_label: str,
     bill_metadata: Dict[Tuple[str, str], Dict[str, str]],
+    state_label: str,
 ) -> io.BytesIO:
     doc = Document()
     doc.add_heading(f"{legislator_name} — {filter_label}", level=1)
+
+    state_display = (state_label or "").strip() or "State"
+    if state_display == ALL_STATES_LABEL:
+        state_display = "State"
 
     if rows.empty:
         doc.add_paragraph("No records available for this selection.")
@@ -752,36 +841,47 @@ def _build_bullet_summary_doc(
             if pd.isna(vote_dt):
                 month_year = "Date unknown"
                 vote_date_str = "Date unknown"
+                vote_date_display = "Date unknown"
             else:
                 month_year = vote_dt.strftime("%B %Y")
                 vote_date_str = vote_dt.strftime("%Y-%m-%d")
+                vote_date_display = vote_dt.strftime("%B %d, %Y")
 
-            vote_desc = (row.get("Vote") or "").strip()
-            vote_fragment = vote_desc.lower() if vote_desc else "n/a"
+            vote_phrase = _vote_phrase(row.get("Vote Bucket"))
 
             bill_motion = (row.get("Bill Motion") or "").strip()
             if not bill_motion:
                 bill_motion = (row.get("Bill Description") or "").strip()
+            if not bill_motion:
+                bill_motion = bill_number or "this measure"
+
             bill_description = (row.get("Bill Description") or "").strip()
+            bill_reference = bill_number or bill_motion or "the bill"
 
-            latest_action_text = _format_latest_action(meta)
+            outcome_sentence = _build_outcome_sentence(row, meta)
 
-            chamber = (row.get("Chamber") or "").strip() or "Unknown chamber"
-            result_text = _format_result_text(row.get("Result"))
-            last_action_date = meta.get("last_action_date") or meta.get("status_date") or "n/a"
-
-            bracket = f"[{chamber}, {bill_number or 'Unknown bill'}, {vote_date_str}; {result_text}, {last_action_date}]"
-
-            sentence_parts = [
-                f"{month_year}: {legislator_name} voted to {vote_fragment} on {bill_motion or 'this measure'}.",
-            ]
+            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {bill_motion}."
             if bill_description:
-                sentence_parts.append(f"{bill_description}")
-            sentence_parts.append(f"Latest action: {latest_action_text}.")
-            sentence_parts.append(bracket)
+                sentence_two = f'In {month_year}, {legislator_name} {vote_phrase} {bill_reference}, which "{bill_description}".'
+            else:
+                sentence_two = f"In {month_year}, {legislator_name} {vote_phrase} {bill_reference}."
 
-            paragraph_text = " ".join(sentence_parts)
-            doc.add_paragraph(paragraph_text, style="List Bullet")
+            chamber = (row.get("Chamber") or "").strip() or "Chamber"
+            vote_url = (row.get("URL") or "").strip()
+
+            paragraph = doc.add_paragraph(style="List Bullet")
+            paragraph.add_run(sentence_one + " ")
+            paragraph.add_run(sentence_two + " ")
+            paragraph.add_run(outcome_sentence + " ")
+
+            paragraph.add_run("[")
+            paragraph.add_run(f"{state_display} {chamber}, ")
+            paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
+            if vote_url and vote_date_display != "Date unknown":
+                _add_hyperlink(paragraph, vote_url, vote_date_display)
+            else:
+                paragraph.add_run(vote_date_display)
+            paragraph.add_run("]")
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -1555,11 +1655,15 @@ if generate_summary_clicked and summary_df is not None:
     )
 
     if filtered_count > 0:
+        state_display_value = state_label
+        if state_display_value == ALL_STATES_LABEL:
+            state_display_value = dataset_state or state_code or ""
         bullet_doc_buffer = _build_bullet_summary_doc(
             filtered_df,
             selected_legislator,
             filter_mode,
             bill_metadata,
+            state_display_value,
         )
         bullet_filename = _make_docx_filename(
             selected_legislator,
