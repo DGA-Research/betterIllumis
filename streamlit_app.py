@@ -1,6 +1,7 @@
 import csv
 import datetime as dt
 import io
+import re
 import tempfile
 import zipfile
 from contextlib import ExitStack
@@ -193,6 +194,8 @@ def _archive_key(name: str) -> str:
 
 
 FORBIDDEN_SHEET_CHARS = set('[]:*?/\\')
+ARCHIVE_NAME_PATTERN = re.compile(r"^[A-Z]{2}_[A-Za-z0-9_.\-]+\.zip$")
+REQUIRED_ARCHIVE_FILES = ("people.csv", "bills.csv", "rollcalls.csv", "votes.csv")
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
@@ -306,6 +309,33 @@ def _collect_sponsor_lookup(
                             continue
                         sponsor_lookup[key] = status
     return sponsor_lookup
+
+
+def _validate_archive_payload(payload: bytes) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            zf.extractall(tmp_path)
+        csv_dirs = gather_session_csv_dirs([tmp_path])
+        if not csv_dirs:
+            raise ValueError("Archive does not contain any LegiScan session directories.")
+        for csv_dir in csv_dirs:
+            missing = [name for name in REQUIRED_ARCHIVE_FILES if not (csv_dir / name).exists()]
+            if missing:
+                missing_list = ", ".join(missing)
+                raise ValueError(f"Archive is missing required files: {missing_list} in {csv_dir.name}.")
+
+
+def _save_uploaded_archive(filename: str, payload: bytes) -> Optional[str]:
+    if not ARCHIVE_NAME_PATTERN.match(filename):
+        raise ValueError("Filename must match pattern 'XX_Description.zip'.")
+    _validate_archive_payload(payload)
+    LOCAL_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = LOCAL_ARCHIVE_DIR / filename
+    if target_path.exists():
+        raise FileExistsError("Archive already exists in bulkLegiData.")
+    target_path.write_bytes(payload)
+    return filename
 
 
 def safe_int(value):
@@ -725,6 +755,8 @@ if not uploaded_zips and not selected_local_archives:
 zip_payloads: List[bytes] = []
 skipped_uploads: List[str] = []
 duplicate_archives: List[str] = []
+saved_archives: List[str] = []
+archive_save_errors: List[str] = []
 seen_archive_keys: Set[str] = set()
 for uploaded_zip in uploaded_zips or []:
     if state_code and not _archive_matches_state(uploaded_zip.name, state_code):
@@ -736,10 +768,23 @@ for uploaded_zip in uploaded_zips or []:
         continue
     seen_archive_keys.add(archive_key)
     try:
-        zip_payloads.append(uploaded_zip.getvalue())
+        payload_bytes = uploaded_zip.getvalue()
+        zip_payloads.append(payload_bytes)
     except Exception as exc:  # pragma: no cover - streamlit runtime guard
         st.error(f"Failed to read uploaded file '{uploaded_zip.name}': {exc}")
         st.stop()
+    try:
+        saved_name = _save_uploaded_archive(uploaded_zip.name, payload_bytes)
+        if saved_name:
+            saved_archives.append(saved_name)
+    except ValueError as exc:
+        archive_save_errors.append(f"{uploaded_zip.name}: {exc}")
+    except zipfile.BadZipFile:
+        archive_save_errors.append(f"{uploaded_zip.name}: Invalid ZIP archive.")
+    except FileExistsError as exc:
+        archive_save_errors.append(f"{uploaded_zip.name}: {exc}")
+    except Exception as exc:  # pragma: no cover - unexpected
+        archive_save_errors.append(f"{uploaded_zip.name}: {exc}")
 
 for archive_path in selected_local_archives:
     archive_key = _archive_key(archive_path.name)
@@ -757,6 +802,17 @@ if skipped_uploads:
     st.warning(
         f"Skipped uploads that do not match the selected state ({state_label}): "
         + ", ".join(skipped_uploads)
+    )
+
+if saved_archives:
+    st.success(
+        "Added new LegiScan archive(s) to 'bulkLegiData': "
+        + ", ".join(saved_archives)
+    )
+
+if archive_save_errors:
+    st.warning(
+        "Some uploads were not saved: " + "; ".join(archive_save_errors)
     )
 
 if duplicate_archives:
