@@ -1,3 +1,4 @@
+import base64
 import csv
 import datetime as dt
 import io
@@ -11,6 +12,7 @@ from typing import List, Optional, Tuple, Set
 from openpyxl import Workbook
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from generate_kristin_robbins_votes import (
@@ -560,6 +562,83 @@ def _save_uploaded_archive(filename: str, payload: bytes) -> Optional[str]:
     return filename
 
 
+def _upload_archives_to_github(saved_archive_names: List[str]) -> Tuple[bool, str]:
+    if not saved_archive_names:
+        return True, "No archives to upload."
+
+    gh_cfg = st.secrets.get("github")
+    if not gh_cfg:
+        return False, "GitHub configuration missing in secrets."
+
+    required_keys = ("token", "owner", "repo")
+    missing_keys = [key for key in required_keys if not gh_cfg.get(key)]
+    if missing_keys:
+        return False, f"GitHub configuration missing keys: {', '.join(missing_keys)}"
+
+    token = gh_cfg["token"]
+    owner = gh_cfg["owner"]
+    repo = gh_cfg["repo"]
+    branch = gh_cfg.get("branch", "main")
+    target_dir = gh_cfg.get("target_dir", "").strip().strip("/")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    uploaded: List[str] = []
+    errors: List[str] = []
+
+    for filename in saved_archive_names:
+        archive_path = LOCAL_ARCHIVE_DIR / filename
+        if not archive_path.exists():
+            errors.append(f"{filename}: file not found after saving.")
+            continue
+
+        try:
+            file_bytes = archive_path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{filename}: unable to read file ({exc}).")
+            continue
+
+        content_b64 = base64.b64encode(file_bytes).decode("utf-8")
+        relative_path = f"{target_dir}/{filename}" if target_dir else filename
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{relative_path}"
+
+        existing_sha = None
+        probe = requests.get(api_url, headers=headers, params={"ref": branch}, timeout=20)
+        if probe.status_code == 200:
+            existing_sha = probe.json().get("sha")
+        elif probe.status_code not in (200, 404):
+            errors.append(
+                f"{filename}: GitHub lookup failed ({probe.status_code}) -> {probe.text}"
+            )
+            continue
+
+        payload = {
+            "message": f"Add LegiScan archive {filename}",
+            "content": content_b64,
+            "branch": branch,
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        response = requests.put(api_url, headers=headers, json=payload, timeout=20)
+        if response.status_code not in (200, 201):
+            errors.append(
+                f"{filename}: GitHub upload failed ({response.status_code}) -> {response.text}"
+            )
+            continue
+
+        uploaded.append(filename)
+
+    if errors:
+        return False, "; ".join(errors)
+
+    return True, f"Uploaded {len(uploaded)} archive(s) to GitHub."
+
+
 def safe_int(value):
     try:
         return int(value)
@@ -1048,6 +1127,11 @@ if saved_archives:
         "Added new LegiScan archive(s) to 'bulkLegiData': "
         + ", ".join(saved_archives)
     )
+    ok, github_message = _upload_archives_to_github(saved_archives)
+    if ok:
+        st.caption(github_message)
+    else:
+        st.warning(f"GitHub upload failed: {github_message}")
 
 if archive_save_errors:
     st.warning(
