@@ -602,7 +602,17 @@ def _build_arizona_outcome_sentence(row: pd.Series, chamber: str, bill_reference
     vote_total = _format_vote_total(row)
     outcome = _determine_vote_outcome(row)
     last_action_text = (meta or {}).get("last_action") or ""
+    status_code = (meta or {}).get("status_code") or ""
     last_action_text = last_action_text.strip()
+    status_code = str(status_code).strip()
+
+    if status_code == "1" and last_action_text:
+        cleaned_action = last_action_text.rstrip(".")
+        clause = f"{reference} introduced in {chamber_display} and {cleaned_action}"
+        if vote_total:
+            clause = f"{clause} {vote_total}"
+        return clause + "."
+
     if outcome == "tied":
         if vote_total:
             return f"{reference} introduced in {chamber_display} and resulted in a tied vote {vote_total}."
