@@ -7,8 +7,12 @@ import tempfile
 import zipfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set
 
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE
 from openpyxl import Workbook
 
 import pandas as pd
@@ -81,7 +85,6 @@ STATE_CHOICES = [
     ("Wyoming", "WY"),
 ]
 STATE_NAME_TO_CODE = {name: code for name, code in STATE_CHOICES}
-STATE_CODE_TO_NAME = {code: name for name, code in STATE_CHOICES}
 PARTY_DISPLAY_MAP = {
     "Democrat": "Democrat",
     "Republican": "Republican",
@@ -93,195 +96,6 @@ FOCUS_PARTY_LOOKUP = {
     "Republican": "Republican",
     "Independent": "Other",
 }
-BULLET_COLUMN = "Bullet Summary"
-
-
-def _state_display_name(dataset_state: Optional[str], state_label: Optional[str]) -> str:
-    if state_label and state_label not in {None, ALL_STATES_LABEL}:
-        return state_label
-    if dataset_state:
-        return STATE_CODE_TO_NAME.get(dataset_state.upper(), dataset_state.upper())
-    return "State"
-
-
-def _format_date_string(date_str: str) -> str:
-    date_clean = (date_str or "").strip()
-    if not date_clean:
-        return "Date unavailable"
-    try:
-        parsed = dt.datetime.strptime(date_clean, "%Y-%m-%d").date()
-        return parsed.strftime("%B %d, %Y")
-    except ValueError:
-        try:
-            parsed = dt.datetime.strptime(date_clean, "%m/%d/%Y").date()
-            return parsed.strftime("%B %d, %Y")
-        except ValueError:
-            return date_clean
-
-
-def _sanitize_clause(text: Optional[str]) -> str:
-    if not text:
-        return ""
-    return text.strip().rstrip(".")
-
-
-def _status_sentence(
-    *,
-    status_code: Optional[int],
-    status_desc: str,
-    bill_number: str,
-    chamber: str,
-    last_action: str,
-) -> str:
-    bill_ref = bill_number or "the bill"
-    chamber_ref = chamber or "legislature"
-    sanitized_action = _sanitize_clause(last_action)
-    def and_clause(action: str) -> str:
-        return f" and {action}" if action else ""
-    def comma_clause(action: str) -> str:
-        return f", {action}" if action else ""
-
-    if status_code == 1:
-        return f"{bill_ref} introduced in {chamber_ref}{and_clause(sanitized_action)}."
-    if status_code == 2:
-        return f"{bill_ref} passed in {chamber_ref}{and_clause(sanitized_action)}."
-    if status_code == 4:
-        if "chapter" in sanitized_action.lower():
-            return (
-                f"{bill_ref} passed in Senate and House and signed by governor"
-                f"{comma_clause(sanitized_action)}."
-            )
-        return f"{bill_ref} passed in {chamber_ref}{and_clause(sanitized_action)}."
-    if status_code == 5:
-        extra = f"; {sanitized_action}" if sanitized_action else ""
-        return f"{bill_ref} passed in Senate and House, vetoed by governor{extra}."
-    if status_code == 6:
-        action_upper = sanitized_action.upper()
-        bill_upper = (bill_number or "").upper()
-        if "S" in bill_upper and "HOUSE" in action_upper:
-            return f"{bill_ref} passed in Senate{comma_clause(sanitized_action)}."
-        if "H" in bill_upper and "SENATE" in action_upper:
-            return f"{bill_ref} passed in House{comma_clause(sanitized_action)}."
-        return f"{bill_ref} introduced in {chamber_ref}{comma_clause(sanitized_action)}."
-    if sanitized_action:
-        return f"{bill_ref} status update: {sanitized_action}."
-    if status_desc:
-        return f"{bill_ref} status: {status_desc.strip()}."
-    return f"{bill_ref} status: unavailable."
-
-
-def _format_vote_bullet(
-    row: pd.Series,
-    *,
-    legislator_name: str,
-    dataset_state: Optional[str],
-    state_label: Optional[str],
-) -> str:
-    date_value = row.get("Date_dt")
-    if isinstance(date_value, pd.Timestamp) and not pd.isna(date_value):
-        month_upper = date_value.strftime("%B").upper()
-        month_title = date_value.strftime("%B")
-        year_str = date_value.strftime("%Y")
-    else:
-        month_upper = "UNKNOWN"
-        month_title = "Unknown"
-        year_str = ""
-    date_prefix_upper = " ".join(part for part in [month_upper, year_str] if part).strip()
-    if not date_prefix_upper:
-        date_prefix_upper = "DATE UNKNOWN"
-    month_sentence_part = " ".join(part for part in [month_title, year_str] if part).strip()
-    if not month_sentence_part:
-        month_sentence_part = "Unknown date"
-
-    bill_number_raw = (row.get("Bill Number") or "").strip()
-    bill_reference = bill_number_raw or "the bill"
-    bill_reference_sentence = bill_number_raw or "the bill"
-
-    description = (row.get("Bill Description") or row.get("Bill Motion") or "").strip()
-    if not description:
-        description = "No description provided"
-    description = description.replace('"', "'")
-
-    vote_bucket = (row.get("Vote Bucket") or "").strip().lower()
-    vote_upper_map = {
-        "for": "VOTED FOR",
-        "against": "VOTED AGAINST",
-        "absent": "WAS ABSENT ON",
-        "not": "DID NOT VOTE ON",
-    }
-    vote_lower_map = {
-        "for": "voted for",
-        "against": "voted against",
-        "absent": "was absent on",
-        "not": "did not vote on",
-    }
-    vote_upper = vote_upper_map.get(vote_bucket, f"VOTED {vote_bucket.upper()}" if vote_bucket else "CAST A VOTE ON")
-    vote_lower = vote_lower_map.get(vote_bucket, f"voted {vote_bucket}" if vote_bucket else "voted on")
-
-    status_raw = (row.get("Status Code") or "").strip()
-    try:
-        status_code = int(status_raw)
-    except ValueError:
-        status_code = None
-    status_desc = (row.get("Status Description") or "").strip()
-
-    chamber = (row.get("Chamber") or "").strip().title()
-    chamber_for_sentence = chamber or "Legislature"
-
-    last_action = (row.get("Last Action") or "").strip()
-    last_action_date = (row.get("Last Action Date") or "").strip()
-    last_action_date_text = _format_date_string(last_action_date)
-
-    status_sentence = _status_sentence(
-        status_code=status_code,
-        status_desc=status_desc,
-        bill_number=bill_reference_sentence,
-        chamber=chamber_for_sentence,
-        last_action=last_action,
-    )
-
-    state_display = _state_display_name(dataset_state, state_label)
-    chamber_for_bracket = chamber.title() if chamber else "Legislature"
-    state_chamber = f"{state_display} State {chamber_for_bracket}".strip()
-
-    url = (row.get("URL") or "").strip()
-    link_segment = f"({url})" if url else ""
-    reference_block = f"[{state_chamber}, {bill_reference_sentence}, {last_action_date_text}{link_segment}]"
-
-    first_sentence = f"{date_prefix_upper}: {legislator_name} {vote_upper} {bill_reference_sentence}."
-    second_sentence = (
-        f"In {month_sentence_part}, {legislator_name} {vote_lower} {bill_reference_sentence}: "
-        f"\"{description}\"."
-    )
-    bullet = f"{first_sentence} {second_sentence} {status_sentence} {reference_block}"
-    return " ".join(bullet.split())
-
-
-def _add_bullet_summary(
-    df: pd.DataFrame,
-    *,
-    legislator_name: str,
-    dataset_state: Optional[str],
-    state_label: Optional[str],
-) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    working_df = df.copy()
-    bullet_series = working_df.apply(
-        lambda row: _format_vote_bullet(
-            row,
-            legislator_name=legislator_name,
-            dataset_state=dataset_state,
-            state_label=state_label,
-        ),
-        axis=1,
-    )
-    working_df[BULLET_COLUMN] = bullet_series
-    columns = list(working_df.columns)
-    if BULLET_COLUMN in columns:
-        columns.insert(0, columns.pop(columns.index(BULLET_COLUMN)))
-        working_df = working_df[columns]
-    return working_df
 
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
@@ -383,6 +197,24 @@ def _make_download_filename(
     name_segment = _format_name_segment(legislator_name)
     type_segment = _format_type_label(type_label)
     return f"{state_segment}_{name_segment}_{type_segment}.xlsx"
+
+
+def _make_docx_filename(
+    legislator_name: str,
+    type_label: str,
+    *,
+    dataset_state: Optional[str] = None,
+    fallback_state: Optional[str] = None,
+) -> str:
+    base = _make_download_filename(
+        legislator_name,
+        type_label,
+        dataset_state=dataset_state,
+        fallback_state=fallback_state,
+    )
+    if base.lower().endswith(".xlsx"):
+        return base[:-5] + ".docx"
+    return base + ".docx"
 
 
 def _list_local_archives() -> List[Path]:
@@ -579,6 +411,136 @@ def _create_sponsor_only_rows(
             }
         )
     return rows
+
+
+def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], Dict[str, str]]:
+    metadata: Dict[Tuple[str, str], Dict[str, str]] = {}
+    with ExitStack() as stack:
+        base_dirs: List[Path] = []
+        for payload in zip_payloads:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(temp_dir)
+            base_dirs.append(Path(temp_dir))
+
+        for base_dir in base_dirs:
+            try:
+                csv_dirs = gather_session_csv_dirs([base_dir])
+            except FileNotFoundError:
+                continue
+            for csv_dir in csv_dirs:
+                bills_path = csv_dir / "bills.csv"
+                if not bills_path.exists():
+                    continue
+                with bills_path.open(encoding="utf-8") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        session_id = str(row.get("session_id", "")).strip()
+                        bill_number = str(row.get("bill_number", "")).strip()
+                        if not session_id or not bill_number:
+                            continue
+                        key = (session_id, bill_number)
+                        metadata[key] = {
+                            "last_action": (row.get("last_action") or "").strip(),
+                            "last_action_date": (row.get("last_action_date") or "").strip(),
+                            "status_code": (row.get("status") or "").strip(),
+                            "status_desc": (row.get("status_desc") or "").strip(),
+                            "status_date": (row.get("status_date") or "").strip(),
+                            "title": (row.get("title") or "").strip(),
+                            "description": (row.get("description") or "").strip(),
+                            "state_link": (row.get("state_link") or row.get("url") or "").strip(),
+                        }
+    return metadata
+
+
+def _add_hyperlink(paragraph, url: str, text: str) -> None:
+    if not url:
+        paragraph.add_run(text)
+        return
+    part = paragraph.part
+    r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    r_style = OxmlElement("w:rStyle")
+    r_style.set(qn("w:val"), "Hyperlink")
+    r_pr.append(r_style)
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    r_pr.append(color)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    r_pr.append(underline)
+
+    new_run.append(r_pr)
+
+    text_elem = OxmlElement("w:t")
+    text_elem.text = text
+    new_run.append(text_elem)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+
+
+def _vote_phrase(vote_bucket: str) -> str:
+    mapping = {
+        "For": "voted for",
+        "Against": "voted against",
+        "Not": "did not vote on",
+        "Absent": "abstained from voting on",
+    }
+    return mapping.get((vote_bucket or "").title(), "took action on")
+
+
+def _format_vote_total(row: pd.Series) -> str:
+    total_for = safe_int(row.get("Total_For"))
+    total_against = safe_int(row.get("Total_Against"))
+    if total_for == 0 and total_against == 0:
+        return ""
+    return f"({total_for}-{total_against})"
+
+
+def _describe_followup(meta: Dict[str, str]) -> str:
+    text = ((meta or {}).get("last_action") or (meta or {}).get("status_desc") or "").lower()
+    if not text:
+        return "and is awaiting further action."
+    keywords_signed = ["signed", "approved by governor", "chaptered", "enacted", "act no."]
+    keywords_veto = ["veto"]
+    keywords_failed = ["failed", "died", "rejected", "indefinitely postponed", "did not pass", "lost"]
+
+    if any(keyword in text for keyword in keywords_signed):
+        return "and was signed by the Governor."
+    if any(keyword in text for keyword in keywords_veto):
+        return "and was vetoed by the Governor."
+    if any(keyword in text for keyword in keywords_failed):
+        return "and failed to advance in the other chamber."
+    if "transmitted to governor" in text or "sent to governor" in text:
+        return "and was sent to the Governor."
+    return "and is awaiting further action."
+
+
+def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
+    bill_number = (row.get("Bill Number") or "The bill").strip() or "The bill"
+    chamber = (row.get("Chamber") or "the chamber").strip() or "the chamber"
+    result_text = _format_result_text(row.get("Result"))
+    vote_total = _format_vote_total(row)
+
+    if result_text == "Passed":
+        clause = f"passed in the {chamber}"
+    elif result_text == "Did not pass":
+        clause = f"failed to advance in the {chamber}"
+    else:
+        clause = f"had an undetermined result in the {chamber}"
+
+    if vote_total:
+        clause = f"{clause} {vote_total}"
+
+    followup = _describe_followup(meta)
+    return f"{bill_number} {clause} {followup}".strip()
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
@@ -845,6 +807,203 @@ def prepare_summary_dataframe(rows: List[List]) -> pd.DataFrame:
     summary_df["Year"] = summary_df["Date_dt"].dt.year
     return summary_df
 
+
+def _format_result_text(result_value: object) -> str:
+    numeric = safe_int(result_value)
+    if numeric == 1:
+        return "Passed"
+    if numeric == 0:
+        return "Did not pass"
+    return "Result unknown"
+
+
+def _format_latest_action(meta: Dict[str, str]) -> str:
+    last_action = (meta or {}).get("last_action") or (meta or {}).get("status_desc") or ""
+    last_action_date = (meta or {}).get("last_action_date") or (meta or {}).get("status_date") or ""
+    if not last_action:
+        return "Latest action unavailable."
+    if last_action_date:
+        return f"{last_action} ({last_action_date})"
+    return last_action
+
+
+def _clean_sentence_fragment(text: Optional[str]) -> str:
+    cleaned = (text or "").strip()
+    return cleaned.rstrip(".")
+
+
+def _status_sentence_for_code(
+    status_code: str,
+    bill_label: str,
+    chamber_display: str,
+    last_action: str,
+    status_desc: str,
+    bill_number: str,
+) -> str:
+    normalized_bill = bill_label or "The bill"
+    normalized_chamber = chamber_display or "the chamber"
+    action_clause = _clean_sentence_fragment(last_action) or _clean_sentence_fragment(status_desc)
+
+    code = (status_code or "").strip()
+    bill_upper = (bill_number or "").upper()
+    action_upper = (last_action or "").upper()
+
+    def append_with_conjunction(prefix: str, conjunction: str = "and") -> str:
+        if action_clause:
+            return f"{prefix} {conjunction} {action_clause}."
+        return f"{prefix}."
+
+    if code == "1":
+        prefix = f"{normalized_bill} introduced in {normalized_chamber}"
+        return append_with_conjunction(prefix)
+
+    if code == "2":
+        prefix = f"{normalized_bill} passed in {normalized_chamber}"
+        return append_with_conjunction(prefix)
+
+    if code == "4" and "CHAPTER " in action_upper:
+        prefix = f"{normalized_bill} passed in Senate and House and signed by governor"
+        if action_clause:
+            return f"{prefix}, {action_clause}."
+        return f"{prefix}."
+
+    if code == "4" and any(tag in bill_upper for tag in ("CR", "CM")):
+        prefix = f"{normalized_bill} passed in {normalized_chamber}"
+        return append_with_conjunction(prefix)
+
+    if code == "5":
+        return f"{normalized_bill} passed in Senate and House, vetoed by governor."
+
+    if code == "6":
+        if "S" in bill_upper and "HOUSE" in action_upper:
+            prefix = f"{normalized_bill} passed in Senate"
+            if action_clause:
+                return f"{prefix}, {action_clause}."
+            return f"{prefix}."
+        if "H" in bill_upper and "SENATE" in action_upper:
+            prefix = f"{normalized_bill} passed in House"
+            if action_clause:
+                return f"{prefix}, {action_clause}."
+            return f"{prefix}."
+        prefix = f"{normalized_bill} introduced in {normalized_chamber}"
+        if action_clause:
+            return f"{prefix}, {action_clause}."
+        return f"{prefix}."
+
+    if action_clause:
+        return f"{normalized_bill} {action_clause}."
+
+    fallback = status_desc.strip() if status_desc else "status update unavailable"
+    if fallback.endswith("."):
+        return f"{normalized_bill} {fallback}"
+    return f"{normalized_bill} {fallback}."
+
+
+def _build_bullet_summary_doc(
+    rows: pd.DataFrame,
+    legislator_name: str,
+    filter_label: str,
+    bill_metadata: Dict[Tuple[str, str], Dict[str, str]],
+    state_label: str,
+) -> io.BytesIO:
+    doc = Document()
+    doc.add_heading(f"{legislator_name} - {filter_label}", level=1)
+
+    state_display = (state_label or '').strip() or 'State'
+    if state_display == ALL_STATES_LABEL:
+        state_display = 'State'
+
+    if rows.empty:
+        doc.add_paragraph('No records available for this selection.')
+    else:
+        for _, row in rows.iterrows():
+            session_id = str(row.get('Session') or '').strip()
+            bill_number = str(row.get('Bill Number') or '').strip()
+            meta = bill_metadata.get((session_id, bill_number), {})
+
+            vote_dt = row.get('Date_dt')
+            if pd.isna(vote_dt):
+                month_year_upper = 'DATE UNKNOWN'
+                date_phrase = 'an unknown date'
+                date_preposition = 'On'
+                vote_date_str = ''
+            else:
+                month_year_upper = vote_dt.strftime('%B %Y').upper()
+                date_phrase = vote_dt.strftime('%B %Y')
+                date_preposition = 'In'
+                vote_date_str = vote_dt.strftime('%Y-%m-%d')
+
+            bill_motion = (row.get('Bill Motion') or '').strip()
+            bill_description = (row.get('Bill Description') or '').strip()
+            if not bill_description:
+                bill_description = (meta.get('description') or meta.get('title') or '').strip()
+
+            primary_reference = bill_number or bill_motion or 'the bill'
+            bill_display = primary_reference or 'the bill'
+
+            chamber_display = (row.get('Chamber') or '').strip() or 'Chamber'
+            vote_url = (row.get('URL') or '').strip()
+
+            vote_bucket = (row.get('Vote Bucket') or '').strip().title()
+            if vote_bucket == 'For':
+                first_phrase = 'VOTED FOR'
+                second_intro = f"{date_preposition} {date_phrase}, {legislator_name} voted For {bill_display}"
+            elif vote_bucket == 'Against':
+                first_phrase = 'VOTED AGAINST'
+                second_intro = f"{date_preposition} {date_phrase}, {legislator_name} voted Against {bill_display}"
+            else:
+                bucket_label = vote_bucket or 'No'
+                first_phrase = f"RECORDED A {bucket_label.upper()} VOTE ON"
+                second_intro = (
+                    f"{date_preposition} {date_phrase}, {legislator_name} recorded a "
+                    f"'{bucket_label}' vote on {bill_display}"
+                )
+
+            description_text = bill_description.strip()
+            if description_text:
+                cleaned_desc = description_text.rstrip('.').replace('"', "'")
+                second_sentence = f'{second_intro}: "{cleaned_desc}".'
+            else:
+                second_sentence = f"{second_intro}."
+
+            first_sentence = f"{month_year_upper}: {legislator_name} {first_phrase} {bill_display}."
+
+            status_sentence = _status_sentence_for_code(
+                meta.get('status_code', ''),
+                bill_display,
+                chamber_display,
+                meta.get('last_action', ''),
+                meta.get('status_desc', ''),
+                bill_number,
+            )
+
+            paragraph = doc.add_paragraph(style='List Bullet')
+            bold_run = paragraph.add_run(first_sentence + ' ')
+            bold_run.bold = True
+            paragraph.add_run(second_sentence + ' ')
+            paragraph.add_run(status_sentence + ' ')
+
+            state_segment = f'State {chamber_display}'
+            if state_display and state_display != 'State':
+                state_segment = f"{state_display} {chamber_display}".strip()
+
+            link_url = (meta.get('state_link') or vote_url).strip()
+            last_action_date = (meta.get('last_action_date') or '').strip()
+            status_date = (meta.get('status_date') or '').strip()
+            link_text = last_action_date or status_date or vote_date_str or 'Date unknown'
+
+            paragraph.add_run(' [')
+            paragraph.add_run(f"{state_segment}, {bill_display}, ")
+            if link_url and link_text:
+                _add_hyperlink(paragraph, link_url, link_text)
+            else:
+                paragraph.add_run(link_text or 'Date unknown')
+            paragraph.add_run(']')
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 def apply_filters(
     summary_df: pd.DataFrame,
@@ -1189,7 +1348,7 @@ def _collect_latest_action_date(zip_payloads: List[bytes]) -> Optional[dt.date]:
 
 
 def _render_state_filter():
-    st.sidebar.header("Data Source")
+    st.sidebar.header("Filtering Parameters")
     state_label = st.sidebar.selectbox(
         "State",
         options=[ALL_STATES_LABEL] + [name for name, _ in STATE_CHOICES],
@@ -1376,11 +1535,7 @@ comparison_label = ""
 max_vote_diff = 5
 
 with st.sidebar:
-    st.header("Legislator")
     selected_legislator = st.selectbox("Legislator", legislator_options)
-    st.divider()
-
-    st.header("Filters")
     filter_mode = st.selectbox(
         "Vote type",
         options=[
@@ -1501,7 +1656,6 @@ with st.sidebar:
         min_group_votes = 0
         st.caption("Shows votes where the legislator did not cast a Yea or Nay.")
 
-    st.subheader("Year")
     year_selection = st.multiselect(
         "Year",
         options=year_options,
@@ -1512,12 +1666,13 @@ with st.sidebar:
 if not selected_legislator:
     st.stop()
 
-generate_summary_clicked = st.button("Generate vote summary")
-generate_workbook_clicked = st.button("Generate vote summary workbook")
+generate_summary_clicked = st.button("Generate current view summary")
+generate_workbook_clicked = st.button("Generate all views workbook")
 
 summary_df: Optional[pd.DataFrame] = None
 sponsor_metadata: dict[Tuple[str, str], dict] = {}
 legislator_party_label: str = ""
+bill_metadata: Dict[Tuple[str, str], Dict[str, str]] = {}
 if generate_summary_clicked or generate_workbook_clicked:
     spinner_label = (
         "Processing LegiScan data..."
@@ -1534,6 +1689,7 @@ if generate_summary_clicked or generate_workbook_clicked:
     sponsor_lookup, sponsor_metadata, legislator_party_label = _collect_sponsor_lookup(
         zip_payloads, selected_legislator
     )
+    bill_metadata = _collect_bill_metadata(zip_payloads)
     session_series = (
         summary_df["Session"].astype(str)
         if "Session" in summary_df.columns
@@ -1570,17 +1726,10 @@ if generate_summary_clicked and summary_df is not None:
         st.warning(str(exc))
         st.stop()
 
-    filtered_df = _add_bullet_summary(
-        filtered_df,
-        legislator_name=selected_legislator,
-        dataset_state=dataset_state,
-        state_label=state_label,
-    )
-
     filtered_count = len(filtered_df)
-    state_suffix = f" ({dataset_state})" if dataset_state else ""
+    state_label = f" ({dataset_state})" if dataset_state else ""
     st.success(
-        f"Compiled {total_count} votes for {selected_legislator}{state_suffix}. "
+        f"Compiled {total_count} votes for {selected_legislator}{state_label}. "
         f"Showing {filtered_count} after filters."
     )
 
@@ -1591,9 +1740,6 @@ if generate_summary_clicked and summary_df is not None:
         person_index = len(export_headers)
     if "Sponsorship" not in export_headers:
         export_headers.insert(person_index, "Sponsorship")
-    if BULLET_COLUMN not in export_headers:
-        bullet_insert_idx = export_headers.index("Bill Description") + 1
-        export_headers.insert(bullet_insert_idx, BULLET_COLUMN)
 
     export_df = (
         filtered_df.rename(columns={"Sponsorship Status": "Sponsorship"})
@@ -1613,11 +1759,38 @@ if generate_summary_clicked and summary_df is not None:
         fallback_state=state_code,
     )
     st.download_button(
-        label="Download filtered Excel workbook",
+        label="Download filtered Excel sheet",
         data=download_buffer.getvalue(),
         file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    if filtered_count > 0:
+        state_display_value = state_label
+        if state_display_value == ALL_STATES_LABEL:
+            state_display_value = dataset_state or state_code or ""
+        bullet_doc_buffer = _build_bullet_summary_doc(
+            filtered_df,
+            selected_legislator,
+            filter_mode,
+            bill_metadata,
+            state_display_value,
+        )
+        bullet_filename = _make_docx_filename(
+            selected_legislator,
+            filter_mode,
+            dataset_state=dataset_state,
+            fallback_state=state_code,
+        )
+        st.download_button(
+            label="Download bullet summary",
+            data=bullet_doc_buffer.getvalue(),
+            file_name=bullet_filename,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="download_bullet_summary",
+        )
+    else:
+        st.info("No records available for bullet summary.")
 
     display_df = filtered_df.copy()
     display_df["Date"] = display_df["Date_dt"].dt.date
@@ -1747,12 +1920,6 @@ if generate_workbook_clicked and summary_df is not None:
         except ValueError:
             empty_views.append(sheet_name)
             sheet_df = summary_df.iloc[0:0].copy()
-        sheet_df = _add_bullet_summary(
-            sheet_df,
-            legislator_name=selected_legislator,
-            dataset_state=dataset_state,
-            state_label=state_label,
-        )
         sheet_headers = list(WORKBOOK_HEADERS)
         if "Person" in sheet_headers:
             person_idx = sheet_headers.index("Person") + 1
@@ -1761,9 +1928,6 @@ if generate_workbook_clicked and summary_df is not None:
         sponsorship_header = "Sponsorship"
         if sponsorship_header not in sheet_headers:
             sheet_headers.insert(person_idx, sponsorship_header)
-        if BULLET_COLUMN not in sheet_headers:
-            bullet_insert_idx = sheet_headers.index("Bill Description") + 1
-            sheet_headers.insert(bullet_insert_idx, BULLET_COLUMN)
         sheet_df_export = (
             sheet_df.rename(columns={"Sponsorship Status": sponsorship_header})
             .reindex(columns=sheet_headers)
