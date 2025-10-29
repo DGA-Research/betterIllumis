@@ -31,10 +31,6 @@ WORKBOOK_HEADERS = [
     "Vote Bucket",
     "Date",
     "Result",
-    "Status Code",
-    "Status Description",
-    "Last Action",
-    "Last Action Date",
     "Democrat_For",
     "Democrat_Against",
     "Democrat_Absent",
@@ -292,7 +288,9 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             if not bill:
                 continue
 
-            bill_desc = bill.get("description", "")
+            bill_desc = (bill.get("description") or "").strip()
+            if not bill_desc:
+                bill_desc = (bill.get("title") or "").strip()
             bill_motion = bill_desc
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")
@@ -338,10 +336,6 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 vote_bucket,
                 date_serial,
                 result,
-                status,
-                status_desc,
-                bill.get("last_action", ""),
-                bill.get("last_action_date", ""),
             ]
 
             for party in ("Democrat", "Republican", "Other", "Total"):
