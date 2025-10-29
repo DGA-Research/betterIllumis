@@ -483,61 +483,72 @@ def _add_hyperlink(paragraph, url: str, text: str) -> None:
     paragraph._p.append(hyperlink)
 
 
-def _vote_phrase(vote_bucket: str) -> str:
-    mapping = {
-        "For": "voted for",
-        "Against": "voted against",
-        "Not": "did not vote on",
-        "Absent": "abstained from voting on",
-    }
-    return mapping.get((vote_bucket or "").title(), "took action on")
+def _clean_sentence_fragment(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.endswith("."):
+        cleaned = cleaned[:-1].strip()
+    return cleaned
 
 
-def _format_vote_total(row: pd.Series) -> str:
-    total_for = safe_int(row.get("Total_For"))
-    total_against = safe_int(row.get("Total_Against"))
-    if total_for == 0 and total_against == 0:
-        return ""
-    return f"({total_for}-{total_against})"
+def _resolve_vote_phrases(vote_bucket: str) -> Tuple[str, str]:
+    bucket = (vote_bucket or "").strip().lower()
+    if bucket == "for":
+        return "VOTED FOR", "voted for"
+    if bucket == "against":
+        return "VOTED AGAINST", "voted against"
+    if bucket == "absent":
+        return "WAS ABSENT FOR", "was absent for"
+    return "DID NOT VOTE ON", "did not vote on"
 
 
-def _describe_followup(meta: Dict[str, str]) -> str:
-    text = ((meta or {}).get("last_action") or (meta or {}).get("status_desc") or "").lower()
-    if not text:
-        return "and is awaiting further action."
-    keywords_signed = ["signed", "approved by governor", "chaptered", "enacted", "act no."]
-    keywords_veto = ["veto"]
-    keywords_failed = ["failed", "died", "rejected", "indefinitely postponed", "did not pass", "lost"]
+def _compose_status_sentence(
+    status_code: str,
+    bill_number: str,
+    chamber: str,
+    last_action: str,
+) -> str:
+    status = (status_code or "").strip()
+    chamber_text = chamber or "the chamber"
+    action_text = _clean_sentence_fragment(last_action)
+    bill_ref = bill_number or "the bill"
+    bill_ref_upper = (bill_number or "").upper()
+    last_action_lower = (last_action or "").lower()
 
-    if any(keyword in text for keyword in keywords_signed):
-        return "and was signed by the Governor."
-    if any(keyword in text for keyword in keywords_veto):
-        return "and was vetoed by the Governor."
-    if any(keyword in text for keyword in keywords_failed):
-        return "and failed to advance in the other chamber."
-    if "transmitted to governor" in text or "sent to governor" in text:
-        return "and was sent to the Governor."
-    return "and is awaiting further action."
+    if status == "1":
+        if action_text:
+            return f"{bill_ref} introduced in {chamber_text} and {action_text}."
+        return f"{bill_ref} introduced in {chamber_text}."
+    if status == "2":
+        if action_text:
+            return f"{bill_ref} passed in {chamber_text} and {action_text}."
+        return f"{bill_ref} passed in {chamber_text}."
+    if status == "4":
+        if "chapter " in last_action_lower:
+            if action_text:
+                return f"{bill_ref} passed in Senate and House and signed by governor, {action_text}."
+            return f"{bill_ref} passed in Senate and House and signed by governor."
+        if any(token in bill_ref_upper for token in ("CR", "CM")):
+            if action_text:
+                return f"{bill_ref} passed in {chamber_text} and {action_text}."
+            return f"{bill_ref} passed in {chamber_text}."
+    if status == "5":
+        return f"{bill_ref} passed in Senate and House, vetoed by governor."
+    if status == "6":
+        if "S" in bill_ref_upper and "house" in last_action_lower:
+            if action_text:
+                return f"{bill_ref} passed in Senate, {action_text}."
+            return f"{bill_ref} passed in Senate."
+        if "H" in bill_ref_upper and "senate" in last_action_lower:
+            if action_text:
+                return f"{bill_ref} passed in House, {action_text}."
+            return f"{bill_ref} passed in House."
+        if action_text:
+            return f"{bill_ref} introduced in {chamber_text}, {action_text}."
+        return f"{bill_ref} introduced in {chamber_text}."
 
-
-def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
-    bill_number = (row.get("Bill Number") or "The bill").strip() or "The bill"
-    chamber = (row.get("Chamber") or "the chamber").strip() or "the chamber"
-    result_text = _format_result_text(row.get("Result"))
-    vote_total = _format_vote_total(row)
-
-    if result_text == "Passed":
-        clause = f"passed in the {chamber}"
-    elif result_text == "Did not pass":
-        clause = f"failed to advance in the {chamber}"
-    else:
-        clause = f"had an undetermined result in the {chamber}"
-
-    if vote_total:
-        clause = f"{clause} {vote_total}"
-
-    followup = _describe_followup(meta)
-    return f"{bill_number} {clause} {followup}".strip()
+    if action_text:
+        return f"{bill_ref} {action_text}."
+    return f"{bill_ref} status information unavailable."
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
@@ -832,69 +843,83 @@ def _build_bullet_summary_doc(
     state_label: str,
 ) -> io.BytesIO:
     doc = Document()
-    doc.add_heading(f"{legislator_name} — {filter_label}", level=1)
+    doc.add_heading(f"{legislator_name} - {filter_label}", level=1)
 
-    state_display = (state_label or "").strip() or "State"
+    state_display = (state_label or '').strip() or 'State'
     if state_display == ALL_STATES_LABEL:
-        state_display = "State"
+        state_display = 'State'
 
     if rows.empty:
-        doc.add_paragraph("No records available for this selection.")
+        doc.add_paragraph('No records available for this selection.')
     else:
         for _, row in rows.iterrows():
-            session_id = str(row.get("Session") or "").strip()
-            bill_number = str(row.get("Bill Number") or "").strip()
+            session_id = str(row.get('Session') or '').strip()
+            bill_number = str(row.get('Bill Number') or '').strip()
             meta = bill_metadata.get((session_id, bill_number), {})
 
-            vote_dt = row.get("Date_dt")
+            vote_dt = row.get('Date_dt')
             if pd.isna(vote_dt):
-                month_year = "Date unknown"
-                vote_date_str = "Date unknown"
-                vote_date_display = "Date unknown"
+                first_sentence_prefix = 'DATE UNKNOWN'
+                second_sentence_prefix = 'On an unknown date'
+                fallback_vote_date = 'Date unknown'
             else:
-                month_year = vote_dt.strftime("%B %Y")
-                vote_date_str = vote_dt.strftime("%Y-%m-%d")
-                vote_date_display = vote_dt.strftime("%B %d, %Y")
+                first_sentence_prefix = f"{vote_dt.strftime('%B').upper()} {vote_dt.strftime('%Y')}"
+                second_sentence_prefix = f"In {vote_dt.strftime('%B %Y')}"
+                fallback_vote_date = vote_dt.strftime('%Y-%m-%d')
 
-            vote_phrase = _vote_phrase(row.get("Vote Bucket"))
+            bill_motion = (row.get('Bill Motion') or '').strip()
+            bill_description = (row.get('Bill Description') or '').strip()
 
-            bill_motion = (row.get("Bill Motion") or "").strip()
-            bill_description = (row.get("Bill Description") or "").strip()
-
-            primary_reference = bill_number or bill_motion or "the bill"
-            narrative_reference = primary_reference
-            if bill_motion and not primary_reference:
+            primary_reference = bill_number or bill_motion or 'the bill'
+            if bill_motion and not bill_number:
                 primary_reference = bill_motion
 
-            outcome_sentence = _build_outcome_sentence(row, meta)
+            status_code = str(meta.get('status_code') or '').strip()
+            last_action = (meta.get('last_action') or meta.get('status_desc') or '').strip()
+            last_action_date = (
+                (meta.get('last_action_date') or meta.get('status_date') or '').strip()
+                or fallback_vote_date
+                or 'Date unknown'
+            )
+            chamber = (row.get('Chamber') or meta.get('chamber') or '').strip() or 'Chamber'
+            vote_bucket = row.get('Vote Bucket')
+            vote_upper, vote_lower = _resolve_vote_phrases(vote_bucket)
 
-            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
+            description_text = bill_description or meta.get('title') or ''
+            description_clean = (description_text or '').strip().rstrip('.!?').strip()
+            if not description_clean:
+                description_clean = 'No description provided'
 
-            description_text = bill_description or meta.get("title") or ""
-            narrative_sentence = ""
-            if description_text:
-                narrative_sentence = description_text.strip()
-            if narrative_sentence:
-                narrative_sentence = narrative_sentence.rstrip(".") + "."
+            status_sentence = _compose_status_sentence(
+                status_code,
+                primary_reference,
+                chamber,
+                last_action,
+            )
 
-            chamber = (row.get("Chamber") or "").strip() or "Chamber"
-            vote_url = (row.get("URL") or "").strip()
+            vote_url = (row.get('URL') or '').strip()
 
-            paragraph = doc.add_paragraph(style="List Bullet")
-            bold_run = paragraph.add_run(sentence_one + " ")
+            paragraph = doc.add_paragraph(style='List Bullet')
+            first_sentence = f"{first_sentence_prefix}: {legislator_name} {vote_upper} {primary_reference}."
+            bold_run = paragraph.add_run(first_sentence + ' ')
             bold_run.bold = True
-            if narrative_sentence:
-                paragraph.add_run(narrative_sentence + " ")
-            paragraph.add_run(outcome_sentence + " ")
 
-            paragraph.add_run("[")
+            second_sentence = (
+                f"{second_sentence_prefix}, {legislator_name} {vote_lower} {primary_reference}: "
+                f"\"{description_clean}.\""
+            )
+            paragraph.add_run(second_sentence + ' ')
+            paragraph.add_run(status_sentence + ' ')
+
+            paragraph.add_run('[')
             paragraph.add_run(f"{state_display} {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
-            if vote_url and vote_date_display != "Date unknown":
-                _add_hyperlink(paragraph, vote_url, vote_date_display)
-            else:
-                paragraph.add_run(vote_date_display)
-            paragraph.add_run("]")
+            paragraph.add_run(last_action_date or 'Date unknown')
+            if vote_url:
+                paragraph.add_run('(')
+                _add_hyperlink(paragraph, vote_url, 'state link')
+                paragraph.add_run(')')
+            paragraph.add_run(']')
 
     buffer = io.BytesIO()
     doc.save(buffer)
