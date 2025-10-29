@@ -261,6 +261,7 @@ PARTY_CODE_MAP = {
 }
 HOUSE_PREFIXES = ("HOUSE", "HJR", "HCR", "HB", "HR", "HC", "HJ", "HS", "H")
 SENATE_PREFIXES = ("SENATE", "SJR", "SCR", "SB", "SR", "SC", "SJ", "SS", "S")
+BILL_NUMBER_SPACE_PATTERN = re.compile(r"^([A-Za-z]{1,4})(\d{1,5})([A-Za-z0-9]*)$")
 
 
 def _normalize_party_label(party_code: str) -> str:
@@ -285,6 +286,18 @@ def _infer_chamber_from_bill(bill_number: str) -> str:
         if token.startswith(prefix):
             return "House"
     return ""
+
+
+def _format_bill_identifier(bill_number: str, state_code: str) -> str:
+    token = (bill_number or "").strip()
+    if not token:
+        return ""
+    if state_code == "AZ":
+        match = BILL_NUMBER_SPACE_PATTERN.match(token)
+        if match:
+            suffix = match.group(3) or ""
+            return f"{match.group(1)} {match.group(2)}{suffix}"
+    return token
 
 
 def _format_roll_details(roll_row: dict) -> str:
@@ -1040,8 +1053,9 @@ def _build_bullet_summary_doc(
         for _, row in rows.iterrows():
             is_sponsor_view = filter_label == "Sponsored/Cosponsored Bills"
             session_id = str(row.get("Session") or "").strip()
-            bill_number = str(row.get("Bill Number") or "").strip()
-            meta = bill_metadata.get((session_id, bill_number), {})
+            bill_number_raw = str(row.get("Bill Number") or "").strip()
+            formatted_bill_number = _format_bill_identifier(bill_number_raw, state_code)
+            meta = bill_metadata.get((session_id, bill_number_raw), {})
 
             vote_dt = row.get("Date_dt")
             if pd.isna(vote_dt):
@@ -1057,7 +1071,7 @@ def _build_bullet_summary_doc(
             bill_description = (row.get("Bill Description") or "").strip()
             bill_title = (meta.get("title") or "").strip()
 
-            primary_reference = bill_number or bill_motion or "the bill"
+            primary_reference = formatted_bill_number or bill_number_raw or bill_motion or "the bill"
 
             outcome_sentence = _build_outcome_sentence(row, meta) if not is_sponsor_view else ""
 
@@ -1132,7 +1146,7 @@ def _build_bullet_summary_doc(
 
             paragraph.add_run("[")
             paragraph.add_run(f"State {chamber}, ")
-            paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
+            paragraph.add_run(f"{formatted_bill_number or bill_number_raw or 'Unknown bill'}, ")
             if vote_url and action_date != "Date unknown":
                 _add_hyperlink(paragraph, vote_url, action_date)
             else:
