@@ -580,7 +580,7 @@ def _format_vote_ratio(counts: Optional[Dict[str, object]]) -> str:
         return ""
     yea_str = "?" if yea is None else str(yea)
     nay_str = "?" if nay is None else str(nay)
-    return f"{yea_str}/{nay_str}"
+    return f"{yea_str}-{nay_str}"
 
 
 def _compose_status_sentence(
@@ -618,12 +618,22 @@ def _compose_status_sentence(
         latest_counts = latest_counts or {}
         senate_ratio = _format_vote_ratio(latest_counts.get("Senate"))
         house_ratio = _format_vote_ratio(latest_counts.get("House"))
-        if senate_ratio and house_ratio:
-            return f"{bill_ref} passed in Senate {senate_ratio} and House {house_ratio}, vetoed by governor."
-        if senate_ratio:
-            return f"{bill_ref} passed in Senate {senate_ratio}, vetoed by governor."
-        if house_ratio:
-            return f"{bill_ref} passed in House {house_ratio}, vetoed by governor."
+        primary_first = "house" if chamber_text.lower() == "house" else "senate"
+        if primary_first == "house":
+            ordered = [("House", house_ratio), ("Senate", senate_ratio)]
+        else:
+            ordered = [("Senate", senate_ratio), ("House", house_ratio)]
+        first_label, first_ratio = ordered[0]
+        second_label, second_ratio = ordered[1]
+        if first_ratio and second_ratio:
+            return (
+                f"{bill_ref} passed in {first_label} {first_ratio} "
+                f"and {second_label} {second_ratio}, vetoed by governor."
+            )
+        if first_ratio:
+            return f"{bill_ref} passed in {first_label} {first_ratio}, vetoed by governor."
+        if second_ratio:
+            return f"{bill_ref} passed in {second_label} {second_ratio}, vetoed by governor."
         return f"{bill_ref} passed in Senate and House, vetoed by governor."
     if status == "6":
         if "S" in bill_ref_upper and "house" in last_action_lower:
