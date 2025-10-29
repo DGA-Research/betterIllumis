@@ -1060,14 +1060,16 @@ def _build_bullet_summary_doc(
 
             outcome_sentence = _build_outcome_sentence(row, meta)
 
-            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
-            uppercase_sentence_one = sentence_one.upper().replace(": ", "; ")
+            date_phrase = (
+                vote_date_display if vote_date_display != "Date unknown" else month_year
+            )
+            sentence_one = f"{date_phrase}: {legislator_name} {vote_phrase} {primary_reference}."
 
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
 
             paragraph = doc.add_paragraph(style="List Bullet")
-            bold_run = paragraph.add_run(uppercase_sentence_one + " ")
+            bold_run = paragraph.add_run(sentence_one + " ")
             bold_run.bold = True
 
             summary_parts = _summarize_bill_text(
@@ -1083,7 +1085,7 @@ def _build_bullet_summary_doc(
             if description_text:
                 desc_core = description_text.rstrip(".!?").strip()
                 second_sentence = (
-                    f'In {month_year}, {legislator_name} {vote_phrase} {primary_reference}, "{desc_core}".'
+                    f"In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: {desc_core}."
                 )
                 paragraph.add_run(second_sentence + " ")
 
