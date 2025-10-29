@@ -1038,6 +1038,7 @@ def _build_bullet_summary_doc(
         doc.add_paragraph("No records available for this selection.")
     else:
         for _, row in rows.iterrows():
+            is_sponsor_view = filter_label == "Sponsored/Cosponsored Bills"
             session_id = str(row.get("Session") or "").strip()
             bill_number = str(row.get("Bill Number") or "").strip()
             meta = bill_metadata.get((session_id, bill_number), {})
@@ -1058,58 +1059,84 @@ def _build_bullet_summary_doc(
 
             primary_reference = bill_number or bill_motion or "the bill"
 
-            outcome_sentence = _build_outcome_sentence(row, meta)
+            outcome_sentence = _build_outcome_sentence(row, meta) if not is_sponsor_view else ""
 
             date_phrase = (
                 vote_date_display if vote_date_display != "Date unknown" else month_year
             )
             sentence_one = f"{date_phrase}: {legislator_name} {vote_phrase} {primary_reference}."
+            uppercase_sentence_one = sentence_one.upper()
 
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
 
             paragraph = doc.add_paragraph(style="List Bullet")
-            bold_run = paragraph.add_run(sentence_one + " ")
-            bold_run.bold = True
+            summary_parts = _summarize_bill_text(state_code, bill_title, bill_description)
 
-            summary_parts = _summarize_bill_text(
-                state_code, bill_title, bill_description
-            )
+            if is_sponsor_view:
+                sponsorship_status = str(
+                    row.get("Sponsorship Status") or row.get("Sponsorship") or ""
+                ).lower()
+                verb = "cosponsored" if "co" in sponsorship_status else "sponsored"
 
-            title_text = (summary_parts.get("title") or "").strip()
-            if title_text:
-                title_run = paragraph.add_run(title_text + " ")
-                title_run.italic = True
+                first_sentence = f"{month_year}: {legislator_name} {verb} {primary_reference}."
+                first_run = paragraph.add_run(first_sentence + " ")
+                first_run.bold = True
 
-            description_text = (summary_parts.get("description") or "").strip()
-            if description_text:
-                desc_core = description_text.rstrip(".!?").strip()
-                second_sentence = (
-                    f"In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: {desc_core}."
-                )
-                paragraph.add_run(second_sentence + " ")
+                description_text = (summary_parts.get("description") or "").strip()
+                if description_text:
+                    desc_core = description_text.rstrip(".!?").strip()
+                    paragraph.add_run(
+                        f'In {month_year}, {legislator_name} {verb} {primary_reference}, "{desc_core}". '
+                    )
 
-            for extra_text in summary_parts.get("additional", []):
-                cleaned_extra = _ensure_sentence(str(extra_text)).strip()
-                if cleaned_extra:
-                    paragraph.add_run(cleaned_extra + " ")
-
-            paragraph.add_run(outcome_sentence + " ")
-
-            status_date = (meta.get("status_date") or meta.get("last_action_date") or "").strip()
-            if not status_date:
-                if not pd.isna(vote_dt):
-                    status_date = vote_dt.strftime("%Y-%m-%d")
+                last_action_text = (meta.get("last_action") or "").strip()
+                if not last_action_text:
+                    last_action_text = (meta.get("status_desc") or "").strip()
+                if last_action_text:
+                    sentence_three = f"{primary_reference} {last_action_text.rstrip('.')}."
                 else:
-                    status_date = "Date unknown"
+                    sentence_three = f"{primary_reference} status unavailable."
+                paragraph.add_run(sentence_three + " ")
+            else:
+                bold_run = paragraph.add_run(uppercase_sentence_one + " ")
+                bold_run.bold = True
+
+                title_text = (summary_parts.get("title") or "").strip()
+                if title_text:
+                    title_run = paragraph.add_run(title_text + " ")
+                    title_run.italic = True
+
+                description_text = (summary_parts.get("description") or "").strip()
+                if description_text:
+                    desc_core = description_text.rstrip(".!?").strip()
+                    second_sentence = (
+                        f"In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: {desc_core}."
+                    )
+                    paragraph.add_run(second_sentence + " ")
+
+                for extra_text in summary_parts.get("additional", []):
+                    cleaned_extra = _ensure_sentence(str(extra_text)).strip()
+                    if cleaned_extra:
+                        paragraph.add_run(cleaned_extra + " ")
+
+                paragraph.add_run(outcome_sentence + " ")
+
+            action_date = (meta.get("last_action_date") or "").strip()
+            if not action_date:
+                action_date = (meta.get("status_date") or "").strip()
+            if not action_date and not pd.isna(vote_dt):
+                action_date = vote_dt.strftime("%Y-%m-%d")
+            if not action_date:
+                action_date = "Date unknown"
 
             paragraph.add_run("[")
             paragraph.add_run(f"State {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
-            if vote_url and status_date != "Date unknown":
-                _add_hyperlink(paragraph, vote_url, status_date)
+            if vote_url and action_date != "Date unknown":
+                _add_hyperlink(paragraph, vote_url, action_date)
             else:
-                paragraph.add_run(status_date)
+                paragraph.add_run(action_date)
             paragraph.add_run("]")
 
     buffer = io.BytesIO()
