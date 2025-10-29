@@ -445,6 +445,7 @@ def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], D
                             "last_action_date": (row.get("last_action_date") or "").strip(),
                             "status_desc": (row.get("status_desc") or "").strip(),
                             "status_date": (row.get("status_date") or "").strip(),
+                            "status_code": (row.get("status") or "").strip(),
                             "title": (row.get("title") or "").strip(),
                         }
     return metadata
@@ -874,7 +875,11 @@ def _build_bullet_summary_doc(
             if bill_motion and not bill_number:
                 primary_reference = bill_motion
 
-            status_code = str(meta.get('status_code') or '').strip()
+            status_code = str(
+                (meta.get('status_code') if meta else None)
+                or row.get('Status')
+                or ''
+            ).strip()
             last_action = (meta.get('last_action') or meta.get('status_desc') or '').strip()
             last_action_date = (
                 (meta.get('last_action_date') or meta.get('status_date') or '').strip()
