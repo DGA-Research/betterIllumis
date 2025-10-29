@@ -443,12 +443,9 @@ def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], D
                         metadata[key] = {
                             "last_action": (row.get("last_action") or "").strip(),
                             "last_action_date": (row.get("last_action_date") or "").strip(),
-                            "status_code": (row.get("status") or "").strip(),
                             "status_desc": (row.get("status_desc") or "").strip(),
                             "status_date": (row.get("status_date") or "").strip(),
                             "title": (row.get("title") or "").strip(),
-                            "description": (row.get("description") or "").strip(),
-                            "state_link": (row.get("state_link") or row.get("url") or "").strip(),
                         }
     return metadata
 
@@ -827,78 +824,6 @@ def _format_latest_action(meta: Dict[str, str]) -> str:
     return last_action
 
 
-def _clean_sentence_fragment(text: Optional[str]) -> str:
-    cleaned = (text or "").strip()
-    return cleaned.rstrip(".")
-
-
-def _status_sentence_for_code(
-    status_code: str,
-    bill_label: str,
-    chamber_display: str,
-    last_action: str,
-    status_desc: str,
-    bill_number: str,
-) -> str:
-    normalized_bill = bill_label or "The bill"
-    normalized_chamber = chamber_display or "the chamber"
-    action_clause = _clean_sentence_fragment(last_action) or _clean_sentence_fragment(status_desc)
-
-    code = (status_code or "").strip()
-    bill_upper = (bill_number or "").upper()
-    action_upper = (last_action or "").upper()
-
-    def append_with_conjunction(prefix: str, conjunction: str = "and") -> str:
-        if action_clause:
-            return f"{prefix} {conjunction} {action_clause}."
-        return f"{prefix}."
-
-    if code == "1":
-        prefix = f"{normalized_bill} introduced in {normalized_chamber}"
-        return append_with_conjunction(prefix)
-
-    if code == "2":
-        prefix = f"{normalized_bill} passed in {normalized_chamber}"
-        return append_with_conjunction(prefix)
-
-    if code == "4" and "CHAPTER " in action_upper:
-        prefix = f"{normalized_bill} passed in Senate and House and signed by governor"
-        if action_clause:
-            return f"{prefix}, {action_clause}."
-        return f"{prefix}."
-
-    if code == "4" and any(tag in bill_upper for tag in ("CR", "CM")):
-        prefix = f"{normalized_bill} passed in {normalized_chamber}"
-        return append_with_conjunction(prefix)
-
-    if code == "5":
-        return f"{normalized_bill} passed in Senate and House, vetoed by governor."
-
-    if code == "6":
-        if "S" in bill_upper and "HOUSE" in action_upper:
-            prefix = f"{normalized_bill} passed in Senate"
-            if action_clause:
-                return f"{prefix}, {action_clause}."
-            return f"{prefix}."
-        if "H" in bill_upper and "SENATE" in action_upper:
-            prefix = f"{normalized_bill} passed in House"
-            if action_clause:
-                return f"{prefix}, {action_clause}."
-            return f"{prefix}."
-        prefix = f"{normalized_bill} introduced in {normalized_chamber}"
-        if action_clause:
-            return f"{prefix}, {action_clause}."
-        return f"{prefix}."
-
-    if action_clause:
-        return f"{normalized_bill} {action_clause}."
-
-    fallback = status_desc.strip() if status_desc else "status update unavailable"
-    if fallback.endswith("."):
-        return f"{normalized_bill} {fallback}"
-    return f"{normalized_bill} {fallback}."
-
-
 def _build_bullet_summary_doc(
     rows: pd.DataFrame,
     legislator_name: str,
@@ -907,103 +832,75 @@ def _build_bullet_summary_doc(
     state_label: str,
 ) -> io.BytesIO:
     doc = Document()
-    doc.add_heading(f"{legislator_name} - {filter_label}", level=1)
+    doc.add_heading(f"{legislator_name} — {filter_label}", level=1)
 
-    state_display = (state_label or '').strip() or 'State'
+    state_display = (state_label or "").strip() or "State"
     if state_display == ALL_STATES_LABEL:
-        state_display = 'State'
+        state_display = "State"
 
     if rows.empty:
-        doc.add_paragraph('No records available for this selection.')
+        doc.add_paragraph("No records available for this selection.")
     else:
         for _, row in rows.iterrows():
-            session_id = str(row.get('Session') or '').strip()
-            bill_number = str(row.get('Bill Number') or '').strip()
+            session_id = str(row.get("Session") or "").strip()
+            bill_number = str(row.get("Bill Number") or "").strip()
             meta = bill_metadata.get((session_id, bill_number), {})
 
-            vote_dt = row.get('Date_dt')
+            vote_dt = row.get("Date_dt")
             if pd.isna(vote_dt):
-                month_year_upper = 'DATE UNKNOWN'
-                date_phrase = 'an unknown date'
-                date_preposition = 'On'
-                vote_date_str = ''
+                month_year = "Date unknown"
+                vote_date_str = "Date unknown"
+                vote_date_display = "Date unknown"
             else:
-                month_year_upper = vote_dt.strftime('%B %Y').upper()
-                date_phrase = vote_dt.strftime('%B %Y')
-                date_preposition = 'In'
-                vote_date_str = vote_dt.strftime('%Y-%m-%d')
+                month_year = vote_dt.strftime("%B %Y")
+                vote_date_str = vote_dt.strftime("%Y-%m-%d")
+                vote_date_display = vote_dt.strftime("%B %d, %Y")
 
-            bill_motion = (row.get('Bill Motion') or '').strip()
-            bill_description = (row.get('Bill Description') or '').strip()
-            if not bill_description:
-                bill_description = (meta.get('description') or meta.get('title') or '').strip()
+            vote_phrase = _vote_phrase(row.get("Vote Bucket"))
 
-            primary_reference = bill_number or bill_motion or 'the bill'
-            bill_display = primary_reference or 'the bill'
+            bill_motion = (row.get("Bill Motion") or "").strip()
+            bill_description = (row.get("Bill Description") or "").strip()
 
-            chamber_display = (row.get('Chamber') or '').strip() or 'Chamber'
-            vote_url = (row.get('URL') or '').strip()
+            primary_reference = bill_number or bill_motion or "the bill"
+            narrative_reference = primary_reference
+            if bill_motion and not primary_reference:
+                primary_reference = bill_motion
 
-            vote_bucket = (row.get('Vote Bucket') or '').strip().title()
-            if vote_bucket == 'For':
-                first_phrase = 'VOTED FOR'
-                second_intro = f"{date_preposition} {date_phrase}, {legislator_name} voted For {bill_display}"
-            elif vote_bucket == 'Against':
-                first_phrase = 'VOTED AGAINST'
-                second_intro = f"{date_preposition} {date_phrase}, {legislator_name} voted Against {bill_display}"
-            else:
-                bucket_label = vote_bucket or 'No'
-                first_phrase = f"RECORDED A {bucket_label.upper()} VOTE ON"
-                second_intro = (
-                    f"{date_preposition} {date_phrase}, {legislator_name} recorded a "
-                    f"'{bucket_label}' vote on {bill_display}"
-                )
+            outcome_sentence = _build_outcome_sentence(row, meta)
 
-            description_text = bill_description.strip()
+            sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
+
+            description_text = bill_description or meta.get("title") or ""
+            narrative_sentence = ""
             if description_text:
-                cleaned_desc = description_text.rstrip('.').replace('"', "'")
-                second_sentence = f'{second_intro}: "{cleaned_desc}".'
-            else:
-                second_sentence = f"{second_intro}."
+                narrative_sentence = description_text.strip()
+            if narrative_sentence:
+                narrative_sentence = narrative_sentence.rstrip(".") + "."
 
-            first_sentence = f"{month_year_upper}: {legislator_name} {first_phrase} {bill_display}."
+            chamber = (row.get("Chamber") or "").strip() or "Chamber"
+            vote_url = (row.get("URL") or "").strip()
 
-            status_sentence = _status_sentence_for_code(
-                meta.get('status_code', ''),
-                bill_display,
-                chamber_display,
-                meta.get('last_action', ''),
-                meta.get('status_desc', ''),
-                bill_number,
-            )
-
-            paragraph = doc.add_paragraph(style='List Bullet')
-            bold_run = paragraph.add_run(first_sentence + ' ')
+            paragraph = doc.add_paragraph(style="List Bullet")
+            bold_run = paragraph.add_run(sentence_one + " ")
             bold_run.bold = True
-            paragraph.add_run(second_sentence + ' ')
-            paragraph.add_run(status_sentence + ' ')
+            if narrative_sentence:
+                paragraph.add_run(narrative_sentence + " ")
+            paragraph.add_run(outcome_sentence + " ")
 
-            state_segment = f'State {chamber_display}'
-            if state_display and state_display != 'State':
-                state_segment = f"{state_display} {chamber_display}".strip()
-
-            link_url = (meta.get('state_link') or vote_url).strip()
-            last_action_date = (meta.get('last_action_date') or '').strip()
-            status_date = (meta.get('status_date') or '').strip()
-            link_text = last_action_date or status_date or vote_date_str or 'Date unknown'
-
-            paragraph.add_run(' [')
-            paragraph.add_run(f"{state_segment}, {bill_display}, ")
-            if link_url and link_text:
-                _add_hyperlink(paragraph, link_url, link_text)
+            paragraph.add_run("[")
+            paragraph.add_run(f"{state_display} {chamber}, ")
+            paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
+            if vote_url and vote_date_display != "Date unknown":
+                _add_hyperlink(paragraph, vote_url, vote_date_display)
             else:
-                paragraph.add_run(link_text or 'Date unknown')
-            paragraph.add_run(']')
+                paragraph.add_run(vote_date_display)
+            paragraph.add_run("]")
 
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
 
 def apply_filters(
     summary_df: pd.DataFrame,
