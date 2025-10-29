@@ -916,42 +916,42 @@ def _clean_ga_description(text: str) -> str:
     return _ensure_sentence(primary)
 
 
-def _prepare_state_bullet_fragments(
+def _summarize_bill_text(
     state_code: str, bill_title: str, bill_description: str
-) -> List[Dict[str, str]]:
+) -> Dict[str, object]:
     title = (bill_title or "").strip()
     description = (bill_description or "").strip()
 
     if description and title and description.lower() == title.lower():
         title = ""
 
-    fragments: List[Dict[str, str]] = []
+    summary: Dict[str, object] = {"title": "", "description": "", "additional": []}
 
     if state_code == "MD":
         if title:
-            fragments.append({"text": _ensure_sentence(title), "italic": True})
+            summary["title"] = _ensure_sentence(title)
         if description and description.lower() != title.lower():
-            fragments.append({"text": _ensure_sentence(description)})
-        if not fragments and (title or description):
-            fragments.append({"text": _ensure_sentence(title or description)})
-        return fragments
+            summary["description"] = _ensure_sentence(description)
+        else:
+            summary["description"] = _ensure_sentence(title or description)
+        return summary
 
     if state_code == "GA":
-        title_sentence = _clean_ga_title(title)
-        description_sentence = _clean_ga_description(description or title)
-        if title_sentence:
-            fragments.append({"text": title_sentence, "italic": True})
-        if description_sentence and description_sentence.lower() != title_sentence.lower():
-            fragments.append({"text": description_sentence})
-        if not fragments and (title or description):
-            fragments.append({"text": _ensure_sentence(title or description)})
-        return fragments
+        cleaned_title = _clean_ga_title(title)
+        cleaned_description = _clean_ga_description(description or title)
+        if cleaned_title:
+            summary["title"] = cleaned_title
+        if cleaned_description:
+            summary["description"] = cleaned_description
+        else:
+            summary["description"] = _ensure_sentence(title or description)
+        return summary
 
     if state_code == "KS":
         text = _clean_ks_text(description or title)
         if text:
-            fragments.append({"text": _ensure_sentence(text)})
-        return fragments
+            summary["description"] = _ensure_sentence(text)
+        return summary
 
     if state_code == "MI":
         text = description or title
@@ -959,14 +959,12 @@ def _prepare_state_bullet_fragments(
             pattern = re.compile(r"(?<=\S)\.\s+(?=[A-Z])")
             sentences = [segment.strip() for segment in pattern.split(text) if segment.strip()]
             if sentences:
-                fragments.append({"text": _ensure_sentence(sentences[0])})
+                summary["description"] = _ensure_sentence(sentences[0])
                 if len(sentences) > 1:
-                    remainder = ". ".join(
-                        seg.rstrip(".") for seg in sentences[1:] if seg
-                    )
+                    remainder = ". ".join(seg.rstrip(".") for seg in sentences[1:] if seg)
                     if remainder:
-                        fragments.append({"text": f"({remainder.rstrip('.')})."})
-        return fragments
+                        summary["additional"] = [f"({remainder.rstrip('.')})."]
+        return summary
 
     if state_code == "OR":
         text = description or _clean_or_caption(title)
@@ -982,15 +980,18 @@ def _prepare_state_bullet_fragments(
                     continue
                 seen.add(key)
                 deduped.append(sentence)
-            max_sentences = 4
-            for sentence in deduped[:max_sentences]:
-                fragments.append({"text": _ensure_sentence(sentence)})
-        return fragments
+            if deduped:
+                summary["description"] = _ensure_sentence(deduped[0])
+                additional = [
+                    _ensure_sentence(sentence) for sentence in deduped[1:4]
+                ]
+                summary["additional"] = additional
+        return summary
 
     text = description or title
     if text:
-        fragments.append({"text": _ensure_sentence(text)})
-    return fragments
+        summary["description"] = _ensure_sentence(text)
+    return summary
 
 
 def _build_bullet_summary_doc(
@@ -1043,23 +1044,44 @@ def _build_bullet_summary_doc(
             bold_run = paragraph.add_run(sentence_one + " ")
             bold_run.bold = True
 
-            fragments = _prepare_state_bullet_fragments(
+            summary_parts = _summarize_bill_text(
                 state_code, bill_title, bill_description
             )
-            for fragment in fragments:
-                run = paragraph.add_run(fragment["text"] + " ")
-                if fragment.get("italic"):
-                    run.italic = True
+
+            title_text = (summary_parts.get("title") or "").strip()
+            if title_text:
+                title_run = paragraph.add_run(title_text + " ")
+                title_run.italic = True
+
+            description_text = (summary_parts.get("description") or "").strip()
+            if description_text:
+                desc_core = description_text.rstrip(".!?").strip()
+                second_sentence = (
+                    f'In {month_year}, {legislator_name} {vote_phrase} {primary_reference}, "{desc_core}".'
+                )
+                paragraph.add_run(second_sentence + " ")
+
+            for extra_text in summary_parts.get("additional", []):
+                cleaned_extra = _ensure_sentence(str(extra_text)).strip()
+                if cleaned_extra:
+                    paragraph.add_run(cleaned_extra + " ")
 
             paragraph.add_run(outcome_sentence + " ")
 
+            status_date = (meta.get("status_date") or meta.get("last_action_date") or "").strip()
+            if not status_date:
+                if not pd.isna(vote_dt):
+                    status_date = vote_dt.strftime("%Y-%m-%d")
+                else:
+                    status_date = "Date unknown"
+
             paragraph.add_run("[")
-            paragraph.add_run(f"{state_display} {chamber}, ")
+            paragraph.add_run(f"'{state_display}' {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
-            if vote_url and vote_date_display != "Date unknown":
-                _add_hyperlink(paragraph, vote_url, vote_date_display)
+            if vote_url and status_date != "Date unknown":
+                _add_hyperlink(paragraph, vote_url, status_date)
             else:
-                paragraph.add_run(vote_date_display)
+                paragraph.add_run(status_date)
             paragraph.add_run("]")
 
     buffer = io.BytesIO()
