@@ -590,15 +590,29 @@ def _determine_vote_outcome(row: pd.Series) -> Optional[str]:
     return "tied"
 
 
-def _build_arizona_outcome_sentence(row: pd.Series, chamber: str, bill_reference: str) -> str:
-    chamber_display = (chamber or "").strip() or "the chamber"
+def _build_arizona_outcome_sentence(row: pd.Series, chamber: str, bill_reference: str, meta: Dict[str, str]) -> str:
+    chamber_raw = (chamber or "").strip()
+    if chamber_raw.lower().startswith("the "):
+        chamber_display = chamber_raw
+    elif chamber_raw:
+        chamber_display = f"the {chamber_raw}"
+    else:
+        chamber_display = "the chamber"
     reference = (bill_reference or "The bill").strip() or "The bill"
     vote_total = _format_vote_total(row)
     outcome = _determine_vote_outcome(row)
+    last_action_text = (meta or {}).get("last_action") or ""
+    last_action_text = last_action_text.strip()
     if outcome == "tied":
         if vote_total:
             return f"{reference} introduced in {chamber_display} and resulted in a tied vote {vote_total}."
         return f"{reference} introduced in {chamber_display} and resulted in a tied vote."
+    if outcome == "passed" and last_action_text:
+        cleaned_action = last_action_text.rstrip(".")
+        clause = f"{reference} introduced in {chamber_display} and {cleaned_action}"
+        if vote_total:
+            clause = f"{clause} {vote_total}"
+        return clause + "."
     if outcome:
         if vote_total:
             return f"{reference} introduced in {chamber_display} and {outcome} {vote_total}."
@@ -1168,6 +1182,7 @@ def _build_bullet_summary_doc(
                         row,
                         chamber,
                         primary_reference,
+                        meta,
                     )
 
                 paragraph.add_run(outcome_sentence + " ")
