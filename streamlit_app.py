@@ -186,6 +186,17 @@ def _normalize_state_segment(state_value: Optional[str]) -> str:
     return "".join(tokens)
 
 
+def _infer_state_from_archive_names(names: List[str]) -> Optional[str]:
+    prefixes = {
+        name.strip()[:2].upper()
+        for name in names
+        if name and len(name.strip()) >= 2 and name.strip()[:2].isalpha()
+    }
+    if len(prefixes) == 1:
+        return prefixes.pop()
+    return None
+
+
 def _make_download_filename(
     legislator_name: str,
     type_label: str,
@@ -1076,7 +1087,7 @@ def _build_bullet_summary_doc(
                     status_date = "Date unknown"
 
             paragraph.add_run("[")
-            paragraph.add_run(f"'{state_display}' {chamber}, ")
+            paragraph.add_run(f"{state_display} {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
             if vote_url and status_date != "Date unknown":
                 _add_hyperlink(paragraph, vote_url, status_date)
@@ -1504,6 +1515,7 @@ if not uploaded_zips and not selected_local_archives:
     st.stop()
 
 zip_payloads: List[bytes] = []
+active_archive_names: List[str] = []
 skipped_uploads: List[str] = []
 duplicate_archives: List[str] = []
 saved_archives: List[str] = []
@@ -1521,6 +1533,7 @@ for uploaded_zip in uploaded_zips or []:
     try:
         payload_bytes = uploaded_zip.getvalue()
         zip_payloads.append(payload_bytes)
+        active_archive_names.append(uploaded_zip.name)
     except Exception as exc:  # pragma: no cover - streamlit runtime guard
         st.error(f"Failed to read uploaded file '{uploaded_zip.name}': {exc}")
         st.stop()
@@ -1545,6 +1558,7 @@ for archive_path in selected_local_archives:
     seen_archive_keys.add(archive_key)
     try:
         zip_payloads.append(archive_path.read_bytes())
+        active_archive_names.append(archive_path.name)
     except OSError as exc:
         st.error(f"Failed to read bundled archive '{archive_path.name}': {exc}")
         st.stop()
@@ -1604,6 +1618,11 @@ except FileNotFoundError as exc:
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
+
+if not dataset_state:
+    inferred_state = _infer_state_from_archive_names(active_archive_names)
+    if inferred_state:
+        dataset_state = inferred_state
 
 if not legislator_options:
     st.warning("No legislators found in the uploaded dataset.")
