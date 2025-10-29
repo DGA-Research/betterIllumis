@@ -1087,7 +1087,7 @@ def _build_bullet_summary_doc(
                     status_date = "Date unknown"
 
             paragraph.add_run("[")
-            paragraph.add_run(f"{state_display} {chamber}, ")
+            paragraph.add_run(f"State {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
             if vote_url and status_date != "Date unknown":
                 _add_hyperlink(paragraph, vote_url, status_date)
