@@ -881,6 +881,41 @@ def _clean_or_caption(text: str) -> str:
     return cleaned.strip()
 
 
+def _clean_ga_title(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("; ", ", ")
+    cleaned = re.sub(r",?\s*enact\.?$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r",?\s*and\s+for\s+other\s+purposes\.?$", "", cleaned, flags=re.IGNORECASE
+    )
+    return _ensure_sentence(cleaned)
+
+
+def _clean_ga_description(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"^A\s+BILL\s+to\s+be\s+entitled\s+an\s+Act\s+to\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r";\s*$", "", cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return ""
+    parts = [part.strip() for part in cleaned.split(";") if part.strip()]
+    if not parts:
+        return ""
+    primary = parts[0]
+    if primary:
+        primary = primary[0].upper() + primary[1:] if len(primary) > 1 else primary.upper()
+    return _ensure_sentence(primary)
+
+
 def _prepare_state_bullet_fragments(
     state_code: str, bill_title: str, bill_description: str
 ) -> List[Dict[str, str]]:
@@ -897,6 +932,17 @@ def _prepare_state_bullet_fragments(
             fragments.append({"text": _ensure_sentence(title), "italic": True})
         if description and description.lower() != title.lower():
             fragments.append({"text": _ensure_sentence(description)})
+        if not fragments and (title or description):
+            fragments.append({"text": _ensure_sentence(title or description)})
+        return fragments
+
+    if state_code == "GA":
+        title_sentence = _clean_ga_title(title)
+        description_sentence = _clean_ga_description(description or title)
+        if title_sentence:
+            fragments.append({"text": title_sentence, "italic": True})
+        if description_sentence and description_sentence.lower() != title_sentence.lower():
+            fragments.append({"text": description_sentence})
         if not fragments and (title or description):
             fragments.append({"text": _ensure_sentence(title or description)})
         return fragments
