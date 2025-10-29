@@ -598,35 +598,62 @@ def _build_arizona_outcome_sentence(row: pd.Series, chamber: str, bill_reference
         chamber_display = f"the {chamber_raw}"
     else:
         chamber_display = "the chamber"
+
     reference = (bill_reference or "The bill").strip() or "The bill"
     vote_total = _format_vote_total(row)
     outcome = _determine_vote_outcome(row)
-    last_action_text = (meta or {}).get("last_action") or ""
-    status_code = (meta or {}).get("status_code") or ""
+    last_action_text = (meta or {}).get("last_action") or (meta or {}).get("status_desc") or ""
+    status_code = str((meta or {}).get("status_code") or "").strip()
     last_action_text = last_action_text.strip()
-    status_code = str(status_code).strip()
 
-    if status_code == "1" and last_action_text:
-        cleaned_action = last_action_text.rstrip(".")
-        clause = f"{reference} introduced in {chamber_display} and {cleaned_action}"
-        if vote_total:
-            clause = f"{clause} {vote_total}"
-        return clause + "."
+    def _append_vote(clause: str) -> str:
+        return f"{clause} {vote_total}" if vote_total else clause
+
+    if status_code == "1":
+        clause = f"{reference} introduced in {chamber_display}"
+        if last_action_text:
+            clause = f"{clause} and {last_action_text.rstrip('.')}"
+        return _append_vote(clause) + "."
+
+    if status_code == "2":
+        clause = f"{reference} passed in {chamber_display}"
+        if last_action_text:
+            clause = f"{clause} and {last_action_text.rstrip('.')}"
+        return _append_vote(clause) + "."
+
+    if status_code == "4":
+        reference_upper = reference.upper().replace(" ", "")
+        last_action_upper = last_action_text.upper()
+        if "CHAPTER" in last_action_upper:
+            clause = f"{reference} passed in the Senate and House and signed by governor"
+            if last_action_text:
+                clause = f"{clause}, {last_action_text.rstrip('.')}"
+            return _append_vote(clause) + "."
+        if "CR" in reference_upper or "CM" in reference_upper:
+            clause = f"{reference} passed in {chamber_display}"
+            if last_action_text:
+                clause = f"{clause} and {last_action_text.rstrip('.')}"
+            return _append_vote(clause) + "."
+        clause = f"{reference} passed in {chamber_display}"
+        if last_action_text:
+            clause = f"{clause} and {last_action_text.rstrip('.')}"
+        return _append_vote(clause) + "."
+
+    if status_code == "5":
+        clause = f"{reference} passed in the Senate and House, vetoed by governor"
+        return _append_vote(clause) + "."
 
     if outcome == "tied":
-        if vote_total:
-            return f"{reference} introduced in {chamber_display} and resulted in a tied vote {vote_total}."
-        return f"{reference} introduced in {chamber_display} and resulted in a tied vote."
-    if outcome == "passed" and last_action_text:
-        cleaned_action = last_action_text.rstrip(".")
-        clause = f"{reference} introduced in {chamber_display} and {cleaned_action}"
-        if vote_total:
-            clause = f"{clause} {vote_total}"
-        return clause + "."
+        clause = f"{reference} introduced in {chamber_display} and resulted in a tied vote"
+        return _append_vote(clause) + "."
+
     if outcome:
-        if vote_total:
-            return f"{reference} introduced in {chamber_display} and {outcome} {vote_total}."
-        return f"{reference} introduced in {chamber_display} and {outcome}."
+        clause = f"{reference} introduced in {chamber_display} and {outcome}"
+        clause = _append_vote(clause)
+        if last_action_text:
+            clause = f"{clause} ({last_action_text.rstrip('.')})"
+        return clause + "."
+
     fallback = _format_result_text(row.get("Result"))
     return f"{reference} introduced in {chamber_display}; result: {fallback.lower()}."
 
@@ -1177,9 +1204,14 @@ def _build_bullet_summary_doc(
                 description_text = (summary_parts.get("description") or "").strip()
                 if description_text:
                     desc_core = description_text.rstrip(".!?").strip()
-                    second_sentence = (
-                        f"In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: {desc_core}."
-                    )
+                    if state_code == "AZ":
+                        second_sentence = (
+                            f'In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: "{desc_core}".'
+                        )
+                    else:
+                        second_sentence = (
+                            f"In {date_phrase}, {legislator_name} {vote_phrase} {primary_reference}: {desc_core}."
+                        )
                     paragraph.add_run(second_sentence + " ")
 
                 for extra_text in summary_parts.get("additional", []):
