@@ -578,6 +578,35 @@ def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
     return f"{bill_number} {clause}{transition_phrase}. Current status: {current_status}.".strip()
 
 
+def _determine_vote_outcome(row: pd.Series) -> Optional[str]:
+    total_for = safe_int(row.get("Total_For"))
+    total_against = safe_int(row.get("Total_Against"))
+    if total_for == 0 and total_against == 0:
+        return None
+    if total_for > total_against:
+        return "passed"
+    if total_against > total_for:
+        return "failed"
+    return "tied"
+
+
+def _build_arizona_outcome_sentence(row: pd.Series, chamber: str, bill_reference: str) -> str:
+    chamber_display = (chamber or "").strip() or "the chamber"
+    reference = (bill_reference or "The bill").strip() or "The bill"
+    vote_total = _format_vote_total(row)
+    outcome = _determine_vote_outcome(row)
+    if outcome == "tied":
+        if vote_total:
+            return f"{reference} introduced in {chamber_display} and resulted in a tied vote {vote_total}."
+        return f"{reference} introduced in {chamber_display} and resulted in a tied vote."
+    if outcome:
+        if vote_total:
+            return f"{reference} introduced in {chamber_display} and {outcome} {vote_total}."
+        return f"{reference} introduced in {chamber_display} and {outcome}."
+    fallback = _format_result_text(row.get("Result"))
+    return f"{reference} introduced in {chamber_display}; result: {fallback.lower()}."
+
+
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
     cleaned = "".join("_" if ch in FORBIDDEN_SHEET_CHARS else ch for ch in title)
     cleaned = cleaned.strip() or "Sheet"
@@ -1073,7 +1102,7 @@ def _build_bullet_summary_doc(
 
             primary_reference = formatted_bill_number or bill_number_raw or bill_motion or "the bill"
 
-            outcome_sentence = _build_outcome_sentence(row, meta) if not is_sponsor_view else ""
+            outcome_sentence = "" if is_sponsor_view else _build_outcome_sentence(row, meta)
 
             date_phrase = (
                 vote_date_display if vote_date_display != "Date unknown" else month_year
@@ -1133,6 +1162,13 @@ def _build_bullet_summary_doc(
                     cleaned_extra = _ensure_sentence(str(extra_text)).strip()
                     if cleaned_extra:
                         paragraph.add_run(cleaned_extra + " ")
+
+                if state_code == "AZ":
+                    outcome_sentence = _build_arizona_outcome_sentence(
+                        row,
+                        chamber,
+                        primary_reference,
+                    )
 
                 paragraph.add_run(outcome_sentence + " ")
 
