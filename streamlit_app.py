@@ -469,6 +469,7 @@ def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], D
                             "last_action_date": (row.get("last_action_date") or "").strip(),
                             "status_desc": (row.get("status_desc") or "").strip(),
                             "status_date": (row.get("status_date") or "").strip(),
+                            "status_code": (row.get("status") or "").strip(),
                             "title": (row.get("title") or "").strip(),
                         }
     return metadata
