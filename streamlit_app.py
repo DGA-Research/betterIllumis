@@ -515,20 +515,30 @@ def _format_vote_total(row: pd.Series) -> str:
 def _describe_followup(meta: Dict[str, str]) -> str:
     text = ((meta or {}).get("last_action") or (meta or {}).get("status_desc") or "").lower()
     if not text:
-        return "and is awaiting further action."
+        return "is awaiting further action"
     keywords_signed = ["signed", "approved by governor", "chaptered", "enacted", "act no."]
     keywords_veto = ["veto"]
     keywords_failed = ["failed", "died", "rejected", "indefinitely postponed", "did not pass", "lost"]
 
     if any(keyword in text for keyword in keywords_signed):
-        return "and was signed by the Governor."
+        return "was signed by the Governor"
     if any(keyword in text for keyword in keywords_veto):
-        return "and was vetoed by the Governor."
+        return "was vetoed by the Governor"
     if any(keyword in text for keyword in keywords_failed):
-        return "and failed to advance in the other chamber."
+        return "failed to advance in the other chamber"
     if "transmitted to governor" in text or "sent to governor" in text:
-        return "and was sent to the Governor."
-    return "and is awaiting further action."
+        return "was sent to the Governor"
+    return "is awaiting further action"
+
+
+def _current_status_phrase(meta: Dict[str, str]) -> str:
+    status_desc = (meta or {}).get("status_desc", "").strip()
+    last_action = (meta or {}).get("last_action", "").strip()
+    if status_desc:
+        return status_desc
+    if last_action:
+        return last_action
+    return "Status unavailable"
 
 
 def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
@@ -547,8 +557,12 @@ def _build_outcome_sentence(row: pd.Series, meta: Dict[str, str]) -> str:
     if vote_total:
         clause = f"{clause} {vote_total}"
 
-    followup = _describe_followup(meta)
-    return f"{bill_number} {clause} {followup}".strip()
+    current_status = _current_status_phrase(meta)
+    transition = _describe_followup(meta)
+    transition_phrase = ""
+    if transition:
+        transition_phrase = f" and {transition}"
+    return f"{bill_number} {clause}{transition_phrase}. Current status: {current_status}.".strip()
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
