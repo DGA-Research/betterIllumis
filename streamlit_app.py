@@ -602,6 +602,14 @@ def _compose_status_sentence(
             return f"{bill_ref} introduced in {chamber_text} and {action_text}."
         return f"{bill_ref} introduced in {chamber_text}."
     if status == "2":
+        latest_counts = latest_counts or {}
+        normalized_chamber = chamber_text.title()
+        chamber_display = normalized_chamber if normalized_chamber in {"House", "Senate"} else chamber_text
+        ratio = _format_vote_ratio(latest_counts.get(normalized_chamber))
+        if ratio:
+            if action_text:
+                return f"{bill_ref} passed in {chamber_display} {ratio} and {action_text}."
+            return f"{bill_ref} passed in {chamber_display} {ratio}."
         if action_text:
             return f"{bill_ref} passed in {chamber_text} and {action_text}."
         return f"{bill_ref} passed in {chamber_text}."
