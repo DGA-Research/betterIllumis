@@ -824,6 +824,129 @@ def _format_latest_action(meta: Dict[str, str]) -> str:
     return last_action
 
 
+def _normalize_state_code_label(state_label: str) -> str:
+    label = (state_label or "").strip()
+    if not label:
+        return ""
+    if len(label) == 2 and label.isalpha():
+        return label.upper()
+    return STATE_NAME_TO_CODE.get(label, "").upper()
+
+
+def _ensure_sentence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if stripped.endswith((".", "!", "?")):
+        return stripped
+    return stripped + "."
+
+
+def _clean_ks_text(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"^(Senate|House)\s+Substitute\s+for\s+[A-Z]{1,3}\s*\d+\s+by[^-–—]*[-–—]\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _clean_or_caption(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r";\s+and declaring an emergency\.?$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r";\s+providing that this Act shall be referred to the people.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(Relating to|Concerning)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def _prepare_state_bullet_fragments(
+    state_code: str, bill_title: str, bill_description: str
+) -> List[Dict[str, str]]:
+    title = (bill_title or "").strip()
+    description = (bill_description or "").strip()
+
+    if description and title and description.lower() == title.lower():
+        title = ""
+
+    fragments: List[Dict[str, str]] = []
+
+    if state_code == "MD":
+        if title:
+            fragments.append({"text": _ensure_sentence(title), "italic": True})
+        if description and description.lower() != title.lower():
+            fragments.append({"text": _ensure_sentence(description)})
+        if not fragments and (title or description):
+            fragments.append({"text": _ensure_sentence(title or description)})
+        return fragments
+
+    if state_code == "KS":
+        text = _clean_ks_text(description or title)
+        if text:
+            fragments.append({"text": _ensure_sentence(text)})
+        return fragments
+
+    if state_code == "MI":
+        text = description or title
+        if text:
+            pattern = re.compile(r"(?<=\S)\.\s+(?=[A-Z])")
+            sentences = [segment.strip() for segment in pattern.split(text) if segment.strip()]
+            if sentences:
+                fragments.append({"text": _ensure_sentence(sentences[0])})
+                if len(sentences) > 1:
+                    remainder = ". ".join(
+                        seg.rstrip(".") for seg in sentences[1:] if seg
+                    )
+                    if remainder:
+                        fragments.append({"text": f"({remainder.rstrip('.')})."})
+        return fragments
+
+    if state_code == "OR":
+        text = description or _clean_or_caption(title)
+        text = _clean_or_caption(text)
+        if text:
+            pattern = re.compile(r"(?<=\S)\.\s+(?=[A-Z])")
+            raw_sentences = [segment.strip() for segment in pattern.split(text) if segment.strip()]
+            seen: Set[str] = set()
+            deduped: List[str] = []
+            for sentence in raw_sentences:
+                key = sentence.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(sentence)
+            max_sentences = 4
+            for sentence in deduped[:max_sentences]:
+                fragments.append({"text": _ensure_sentence(sentence)})
+        return fragments
+
+    text = description or title
+    if text:
+        fragments.append({"text": _ensure_sentence(text)})
+    return fragments
+
+
 def _build_bullet_summary_doc(
     rows: pd.DataFrame,
     legislator_name: str,
@@ -832,11 +955,12 @@ def _build_bullet_summary_doc(
     state_label: str,
 ) -> io.BytesIO:
     doc = Document()
-    doc.add_heading(f"{legislator_name} — {filter_label}", level=1)
+    doc.add_heading(f"{legislator_name} - {filter_label}", level=1)
 
     state_display = (state_label or "").strip() or "State"
     if state_display == ALL_STATES_LABEL:
         state_display = "State"
+    state_code = _normalize_state_code_label(state_label)
 
     if rows.empty:
         doc.add_paragraph("No records available for this selection.")
@@ -849,33 +973,22 @@ def _build_bullet_summary_doc(
             vote_dt = row.get("Date_dt")
             if pd.isna(vote_dt):
                 month_year = "Date unknown"
-                vote_date_str = "Date unknown"
                 vote_date_display = "Date unknown"
             else:
                 month_year = vote_dt.strftime("%B %Y")
-                vote_date_str = vote_dt.strftime("%Y-%m-%d")
                 vote_date_display = vote_dt.strftime("%B %d, %Y")
 
             vote_phrase = _vote_phrase(row.get("Vote Bucket"))
 
             bill_motion = (row.get("Bill Motion") or "").strip()
             bill_description = (row.get("Bill Description") or "").strip()
+            bill_title = (meta.get("title") or "").strip()
 
             primary_reference = bill_number or bill_motion or "the bill"
-            narrative_reference = primary_reference
-            if bill_motion and not primary_reference:
-                primary_reference = bill_motion
 
             outcome_sentence = _build_outcome_sentence(row, meta)
 
             sentence_one = f"{month_year}: {legislator_name} {vote_phrase} {primary_reference}."
-
-            description_text = bill_description or meta.get("title") or ""
-            narrative_sentence = ""
-            if description_text:
-                narrative_sentence = description_text.strip()
-            if narrative_sentence:
-                narrative_sentence = narrative_sentence.rstrip(".") + "."
 
             chamber = (row.get("Chamber") or "").strip() or "Chamber"
             vote_url = (row.get("URL") or "").strip()
@@ -883,8 +996,15 @@ def _build_bullet_summary_doc(
             paragraph = doc.add_paragraph(style="List Bullet")
             bold_run = paragraph.add_run(sentence_one + " ")
             bold_run.bold = True
-            if narrative_sentence:
-                paragraph.add_run(narrative_sentence + " ")
+
+            fragments = _prepare_state_bullet_fragments(
+                state_code, bill_title, bill_description
+            )
+            for fragment in fragments:
+                run = paragraph.add_run(fragment["text"] + " ")
+                if fragment.get("italic"):
+                    run.italic = True
+
             paragraph.add_run(outcome_sentence + " ")
 
             paragraph.add_run("[")
@@ -900,7 +1020,6 @@ def _build_bullet_summary_doc(
     doc.save(buffer)
     buffer.seek(0)
     return buffer
-
 
 def apply_filters(
     summary_df: pd.DataFrame,
@@ -1656,7 +1775,7 @@ if generate_summary_clicked and summary_df is not None:
         fallback_state=state_code,
     )
     st.download_button(
-        label="Download filtered Excel sheet",
+        label="Download filtered Excel workbook",
         data=download_buffer.getvalue(),
         file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
