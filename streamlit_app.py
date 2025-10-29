@@ -596,6 +596,7 @@ def _compose_status_sentence(
     bill_ref = bill_number or "the bill"
     bill_ref_upper = (bill_number or "").upper()
     last_action_lower = (last_action or "").lower()
+    last_action_upper = (last_action or "").upper()
 
     if status == "1":
         if action_text:
@@ -614,14 +615,47 @@ def _compose_status_sentence(
             return f"{bill_ref} passed in {chamber_text} and {action_text}."
         return f"{bill_ref} passed in {chamber_text}."
     if status == "4":
-        if "chapter " in last_action_lower:
-            if action_text:
-                return f"{bill_ref} passed in Senate and House and signed by governor, {action_text}."
-            return f"{bill_ref} passed in Senate and House and signed by governor."
+        latest_counts = latest_counts or {}
+        senate_ratio = _format_vote_ratio(latest_counts.get("Senate"))
+        house_ratio = _format_vote_ratio(latest_counts.get("House"))
+
+        if any(token in last_action_upper for token in ("SB", "HB", "CHAPTER")):
+            suffix = f", {action_text}" if action_text else ""
+            if senate_ratio and house_ratio:
+                return (
+                    f"{bill_ref} passed in Senate {senate_ratio} and House {house_ratio}, "
+                    f"and signed by governor{suffix}."
+                )
+            return (
+                f"{bill_ref} passed in Senate and House, and signed by governor{suffix}."
+            )
+
         if any(token in bill_ref_upper for token in ("CR", "CM")):
+            if senate_ratio and house_ratio:
+                if action_text:
+                    return (
+                        f"{bill_ref} passed in Senate {senate_ratio} and House {house_ratio}, "
+                        f"and {action_text}."
+                    )
+                return (
+                    f"{bill_ref} passed in Senate {senate_ratio} and House {house_ratio}."
+                )
             if action_text:
-                return f"{bill_ref} passed in {chamber_text} and {action_text}."
-            return f"{bill_ref} passed in {chamber_text}."
+                return f"{bill_ref} passed in Senate and House and {action_text}."
+            return f"{bill_ref} passed in Senate and House."
+
+        normalized_chamber = chamber_text.title()
+        chamber_display = (
+            normalized_chamber if normalized_chamber in {"House", "Senate"} else chamber_text
+        )
+        chamber_ratio = _format_vote_ratio(latest_counts.get(normalized_chamber))
+        if chamber_ratio:
+            if action_text:
+                return f"{bill_ref} passed in {chamber_display} {chamber_ratio} and {action_text}."
+            return f"{bill_ref} passed in {chamber_display} {chamber_ratio}."
+        if action_text:
+            return f"{bill_ref} passed in {chamber_display} and {action_text}."
+        return f"{bill_ref} passed in {chamber_display}."
     if status == "5":
         latest_counts = latest_counts or {}
         senate_ratio = _format_vote_ratio(latest_counts.get("Senate"))
