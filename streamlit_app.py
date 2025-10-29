@@ -429,25 +429,94 @@ def _collect_bill_metadata(zip_payloads: List[bytes]) -> Dict[Tuple[str, str], D
             except FileNotFoundError:
                 continue
             for csv_dir in csv_dirs:
+                bill_lookup: Dict[int, Tuple[str, str]] = {}
                 bills_path = csv_dir / "bills.csv"
-                if not bills_path.exists():
-                    continue
-                with bills_path.open(encoding="utf-8") as fh:
-                    reader = csv.DictReader(fh)
-                    for row in reader:
-                        session_id = str(row.get("session_id", "")).strip()
-                        bill_number = str(row.get("bill_number", "")).strip()
-                        if not session_id or not bill_number:
-                            continue
-                        key = (session_id, bill_number)
-                        metadata[key] = {
-                            "last_action": (row.get("last_action") or "").strip(),
-                            "last_action_date": (row.get("last_action_date") or "").strip(),
-                            "status_desc": (row.get("status_desc") or "").strip(),
-                            "status_date": (row.get("status_date") or "").strip(),
-                            "status_code": (row.get("status") or "").strip(),
-                            "title": (row.get("title") or "").strip(),
-                        }
+                if bills_path.exists():
+                    with bills_path.open(encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            session_id = str(row.get("session_id", "")).strip()
+                            bill_number = str(row.get("bill_number", "")).strip()
+                            if not session_id or not bill_number:
+                                continue
+                            key = (session_id, bill_number)
+                            try:
+                                bill_id = int(row.get("bill_id", ""))
+                            except (TypeError, ValueError):
+                                bill_id = None
+
+                            entry = metadata.get(key)
+                            if entry is None:
+                                entry = {
+                                    "last_action": (row.get("last_action") or "").strip(),
+                                    "last_action_date": (row.get("last_action_date") or "").strip(),
+                                    "status_desc": (row.get("status_desc") or "").strip(),
+                                    "status_date": (row.get("status_date") or "").strip(),
+                                    "status_code": (row.get("status") or "").strip(),
+                                    "title": (row.get("title") or "").strip(),
+                                    "bill_id": bill_id,
+                                    "latest_votes": {},
+                                }
+                                metadata[key] = entry
+                            else:
+                                entry.update(
+                                    {
+                                        "last_action": (row.get("last_action") or "").strip(),
+                                        "last_action_date": (row.get("last_action_date") or "").strip(),
+                                        "status_desc": (row.get("status_desc") or "").strip(),
+                                        "status_date": (row.get("status_date") or "").strip(),
+                                        "status_code": (row.get("status") or "").strip(),
+                                        "title": (row.get("title") or "").strip(),
+                                    }
+                                )
+                                if bill_id is not None:
+                                    entry["bill_id"] = bill_id
+                                entry.setdefault("latest_votes", {})
+                            if bill_id is not None:
+                                bill_lookup[bill_id] = key
+
+                rollcalls_path = csv_dir / "rollcalls.csv"
+                if rollcalls_path.exists() and bill_lookup:
+                    with rollcalls_path.open(encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            try:
+                                bill_id = int(row.get("bill_id", ""))
+                            except (TypeError, ValueError):
+                                continue
+                            key = bill_lookup.get(bill_id)
+                            if not key:
+                                continue
+                            chamber_value = (row.get("chamber") or "").strip().title()
+                            if chamber_value not in {"Senate", "House"}:
+                                continue
+                            date_str = (row.get("date") or "").strip()
+                            parsed_date: Optional[dt.datetime] = None
+                            if date_str:
+                                try:
+                                    parsed_date = dt.datetime.strptime(date_str, "%Y-%m-%d")
+                                except ValueError:
+                                    parsed_date = None
+                            entry = metadata.get(key)
+                            if entry is None:
+                                continue
+                            counts = entry.setdefault("latest_votes", {})
+                            existing = counts.get(chamber_value)
+                            update_counts = False
+                            if existing is None:
+                                update_counts = True
+                            else:
+                                existing_date = existing.get("date")
+                                if parsed_date and (existing_date is None or parsed_date >= existing_date):
+                                    update_counts = True
+                                elif parsed_date is None and existing_date is None:
+                                    update_counts = True
+                            if update_counts:
+                                counts[chamber_value] = {
+                                    "yea": safe_int(row.get("yea")),
+                                    "nay": safe_int(row.get("nay")),
+                                    "date": parsed_date,
+                                }
     return metadata
 
 
@@ -502,11 +571,24 @@ def _resolve_vote_phrases(vote_bucket: str) -> Tuple[str, str]:
     return "DID NOT VOTE ON", "did not vote on"
 
 
+def _format_vote_ratio(counts: Optional[Dict[str, object]]) -> str:
+    if not counts:
+        return ""
+    yea = counts.get("yea")
+    nay = counts.get("nay")
+    if yea is None and nay is None:
+        return ""
+    yea_str = "?" if yea is None else str(yea)
+    nay_str = "?" if nay is None else str(nay)
+    return f"{yea_str}/{nay_str}"
+
+
 def _compose_status_sentence(
     status_code: str,
     bill_number: str,
     chamber: str,
     last_action: str,
+    latest_counts: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> str:
     status = (status_code or "").strip()
     chamber_text = chamber or "the chamber"
@@ -533,6 +615,15 @@ def _compose_status_sentence(
                 return f"{bill_ref} passed in {chamber_text} and {action_text}."
             return f"{bill_ref} passed in {chamber_text}."
     if status == "5":
+        latest_counts = latest_counts or {}
+        senate_ratio = _format_vote_ratio(latest_counts.get("Senate"))
+        house_ratio = _format_vote_ratio(latest_counts.get("House"))
+        if senate_ratio and house_ratio:
+            return f"{bill_ref} passed in Senate {senate_ratio} and House {house_ratio}, vetoed by governor."
+        if senate_ratio:
+            return f"{bill_ref} passed in Senate {senate_ratio}, vetoed by governor."
+        if house_ratio:
+            return f"{bill_ref} passed in House {house_ratio}, vetoed by governor."
         return f"{bill_ref} passed in Senate and House, vetoed by governor."
     if status == "6":
         if "S" in bill_ref_upper and "house" in last_action_lower:
@@ -900,6 +991,7 @@ def _build_bullet_summary_doc(
                 primary_reference,
                 chamber,
                 last_action,
+                (meta or {}).get("latest_votes"),
             )
 
             vote_url = (row.get('URL') or '').strip()
