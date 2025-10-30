@@ -95,6 +95,28 @@ FOCUS_PARTY_LOOKUP = {
     "Republican": "Republican",
     "Independent": "Other",
 }
+SPONSOR_DROP_COLUMNS = [
+    "Democrat_For",
+    "Democrat_Against",
+    "Democrat_Absent",
+    "Democrat_Not",
+    "Democrat_Total",
+    "Republican_For",
+    "Republican_Against",
+    "Republican_Absent",
+    "Republican_Not",
+    "Republican_Total",
+    "Other_For",
+    "Other_Against",
+    "Other_Absent",
+    "Other_Not",
+    "Other_Total",
+    "Total_For",
+    "Total_Against",
+    "Total_Absent",
+    "Total_Not",
+    "Total_Total",
+]
 
 
 def _collect_legislators_from_zips(zip_payloads: List[bytes]):
@@ -690,6 +712,25 @@ def _compose_status_sentence(
     if action_text:
         return f"{bill_ref} {action_text}."
     return f"{bill_ref} status information unavailable."
+
+
+def _prepare_sponsor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    working = df.copy()
+    if "Bill Number" not in working.columns:
+        return working
+
+    if "Date_dt" not in working.columns:
+        working["Date_dt"] = pd.to_datetime(working.get("Date"), errors="coerce")
+
+    working = (
+        working.sort_values(["Bill Number", "Date_dt"], ascending=[True, False])
+        .drop_duplicates(subset=["Bill Number"], keep="first")
+        .reset_index(drop=True)
+    )
+
+    working = working.drop(columns=SPONSOR_DROP_COLUMNS, errors="ignore")
+    working = working.drop(columns=["Date_dt"], errors="ignore")
+    return working
 
 
 def _sanitize_sheet_title(title: str, used_titles: Set[str]) -> str:
@@ -1798,7 +1839,15 @@ if generate_summary_clicked and summary_df is not None:
         f"Showing {filtered_count} after filters."
     )
 
-    export_headers = list(WORKBOOK_HEADERS)
+    export_source_df = filtered_df
+    if filter_mode == "Sponsored/Cosponsored Bills":
+        export_source_df = _prepare_sponsor_dataframe(filtered_df)
+        export_headers = [
+            header for header in WORKBOOK_HEADERS if header not in SPONSOR_DROP_COLUMNS
+        ]
+    else:
+        export_headers = list(WORKBOOK_HEADERS)
+
     if "Person" in export_headers:
         person_index = export_headers.index("Person") + 1
     else:
@@ -1807,7 +1856,7 @@ if generate_summary_clicked and summary_df is not None:
         export_headers.insert(person_index, "Sponsorship")
 
     export_df = (
-        filtered_df.rename(columns={"Sponsorship Status": "Sponsorship"})
+        export_source_df.rename(columns={"Sponsorship Status": "Sponsorship"})
         .reindex(columns=export_headers)
         .fillna("")
     )
@@ -1985,7 +2034,14 @@ if generate_workbook_clicked and summary_df is not None:
         except ValueError:
             empty_views.append(sheet_name)
             sheet_df = summary_df.iloc[0:0].copy()
+        sheet_source_df = sheet_df
         sheet_headers = list(WORKBOOK_HEADERS)
+        if sheet_name == "Sponsored/Cosponsored Bills":
+            sheet_source_df = _prepare_sponsor_dataframe(sheet_df)
+            sheet_headers = [
+                header for header in sheet_headers if header not in SPONSOR_DROP_COLUMNS
+            ]
+
         if "Person" in sheet_headers:
             person_idx = sheet_headers.index("Person") + 1
         else:
@@ -1994,7 +2050,7 @@ if generate_workbook_clicked and summary_df is not None:
         if sponsorship_header not in sheet_headers:
             sheet_headers.insert(person_idx, sponsorship_header)
         sheet_df_export = (
-            sheet_df.rename(columns={"Sponsorship Status": sponsorship_header})
+            sheet_source_df.rename(columns={"Sponsorship Status": sponsorship_header})
             .reindex(columns=sheet_headers)
             .fillna("")
         )
