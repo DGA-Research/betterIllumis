@@ -393,6 +393,7 @@ def _create_sponsor_only_rows(
                 "Bill Number": meta.get("bill_number", ""),
                 "Bill Motion": meta.get("bill_motion", "") or meta.get("bill_title", ""),
                 "URL": meta.get("bill_url", ""),
+                "Bill Title": meta.get("bill_title", ""),
                 "Bill Description": meta.get("bill_description", "") or meta.get("bill_title", ""),
                 "Roll Details": meta.get("roll_details", ""),
                 "Roll Call ID": normalized_roll_id,
