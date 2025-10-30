@@ -1116,8 +1116,6 @@ def _build_bullet_summary_doc(
                     f"{first_sentence_prefix}: {legislator_name} "
                     f"{sponsor_upper} {sponsor_reference}{title_fragment}."
                 )
-                bold_run = paragraph.add_run(first_sentence + ' ')
-                bold_run.bold = True
                 second_sentence = (
                     f"{second_sentence_prefix}, {legislator_name} "
                     f"{sponsor_lower} {sponsor_reference}, "
@@ -1128,13 +1126,13 @@ def _build_bullet_summary_doc(
                     f"{first_sentence_prefix}: {legislator_name} {vote_upper} "
                     f"{primary_reference}{title_fragment}."
                 )
-                bold_run = paragraph.add_run(first_sentence + ' ')
-                bold_run.bold = True
                 second_sentence = (
                     f"{second_sentence_prefix}, {legislator_name} {vote_lower} {primary_reference}: "
                     f"\"{description_clean}.\""
                 )
 
+            first_sentence_upper = first_sentence.upper()
+            bold_run = paragraph.add_run(first_sentence_upper + ' ')
             bold_run.bold = True
 
             paragraph.add_run(second_sentence + ' ')
@@ -1143,11 +1141,11 @@ def _build_bullet_summary_doc(
             paragraph.add_run('[')
             paragraph.add_run(f"{state_display} {chamber}, ")
             paragraph.add_run(f"{bill_number or 'Unknown bill'}, ")
-            paragraph.add_run(last_action_date or 'Date unknown')
-            if vote_url:
-                paragraph.add_run('(')
-                _add_hyperlink(paragraph, vote_url, 'state link')
-                paragraph.add_run(')')
+            date_text = last_action_date or 'Date unknown'
+            if vote_url and date_text.lower() != 'date unknown':
+                _add_hyperlink(paragraph, vote_url, date_text)
+            else:
+                paragraph.add_run(date_text)
             paragraph.add_run(']')
 
     buffer = io.BytesIO()
