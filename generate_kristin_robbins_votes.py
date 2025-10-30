@@ -299,7 +299,13 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")
             vote_bucket = classify_vote(vote_desc)
-            date_serial = excel_serial(roll["date"]) if roll.get("date") else ""
+            vote_date_value = (roll.get("date") or "").strip()
+            date_serial = ""
+            if vote_date_value:
+                try:
+                    date_serial = dt.datetime.strptime(vote_date_value, "%Y-%m-%d").strftime("%m/%d/%Y")
+                except ValueError:
+                    date_serial = vote_date_value
             status = bill.get("status", "")
             status_desc = bill.get("status_desc", "")
             result = 1 if status == "4" or status_desc.lower() == "passed" else 0
