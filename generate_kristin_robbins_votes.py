@@ -22,6 +22,7 @@ WORKBOOK_HEADERS = [
     "Bill Number",
     "Bill Motion",
     "URL",
+    "Bill Title",
     "Bill Description",
     "Roll Details",
     "Roll Call ID",
@@ -288,10 +289,9 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             if not bill:
                 continue
 
+            bill_title = (bill.get("title") or "").strip()
             bill_desc = (bill.get("description") or "").strip()
-            if not bill_desc:
-                bill_desc = (bill.get("title") or "").strip()
-            bill_motion = bill_desc
+            bill_motion = bill_desc or bill_title or str(bill.get("bill_number", "")).strip()
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")
             vote_bucket = classify_vote(vote_desc)
@@ -327,6 +327,7 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 bill_number,
                 bill_motion,
                 bill_url,
+                bill_title,
                 bill_desc,
                 roll_desc,
                 rcid,
