@@ -22,8 +22,13 @@ WORKBOOK_HEADERS = [
     "Bill Number",
     "Bill Motion",
     "URL",
+    "Bill Title",
     "Bill Description",
     "Roll Details",
+    "Committee ID",
+    "Committee",
+    "Last Action Date",
+    "Last Action",
     "Roll Call ID",
     "Person",
     "Person Party",
@@ -288,14 +293,19 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             if not bill:
                 continue
 
+            bill_title = (bill.get("title") or "").strip()
             bill_desc = (bill.get("description") or "").strip()
-            if not bill_desc:
-                bill_desc = (bill.get("title") or "").strip()
-            bill_motion = bill_desc
+            bill_motion = bill_desc or bill_title or str(bill.get("bill_number", "")).strip()
             bill_url = bill.get("state_link") or bill.get("url") or ""
             vote_desc = vote.get("vote_desc", "")
             vote_bucket = classify_vote(vote_desc)
-            date_serial = excel_serial(roll["date"]) if roll.get("date") else ""
+            vote_date_value = (roll.get("date") or "").strip()
+            date_serial = ""
+            if vote_date_value:
+                try:
+                    date_serial = dt.datetime.strptime(vote_date_value, "%Y-%m-%d").strftime("%m/%d/%Y")
+                except ValueError:
+                    date_serial = vote_date_value
             status = bill.get("status", "")
             status_desc = bill.get("status_desc", "")
             result = 1 if status == "4" or status_desc.lower() == "passed" else 0
@@ -316,6 +326,11 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             roll_suffix = f" ({yea}-Y {nay}-N)"
             roll_desc = f"{roll_desc_raw} {roll_suffix}".strip() if roll_desc_raw else roll_suffix
 
+            committee_id = str(roll.get("committee_id") or "").strip()
+            committee_name = (roll.get("committee") or "").strip()
+            last_action_date = (bill.get("last_action_date") or "").strip()
+            last_action = (bill.get("last_action") or "").strip()
+
             party_counts = counts.get(rcid, {})
 
             def bucket_value(party_label: str, bucket: str) -> int:
@@ -327,8 +342,13 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 bill_number,
                 bill_motion,
                 bill_url,
+                bill_title,
                 bill_desc,
                 roll_desc,
+                committee_id,
+                committee_name,
+                last_action_date,
+                last_action,
                 rcid,
                 target_name,
                 target_party,
