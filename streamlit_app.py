@@ -26,7 +26,6 @@ from generate_kristin_robbins_votes import (
     determine_dataset_state,
     gather_session_csv_dirs,
     collect_person_vote_map,
-    excel_serial,
 )
 
 LOCAL_ARCHIVE_DIR = Path(__file__).resolve().parent / "bulkLegiData"
@@ -328,12 +327,12 @@ def _build_sponsor_metadata(
         else:
             roll_details = "No roll call recorded"
     date_str = roll_date or status_date or last_action_date
-    excel_date = ""
+    display_date = ""
     if date_str:
         try:
-            excel_date = excel_serial(date_str)
+            display_date = dt.datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d/%Y")
         except ValueError:
-            excel_date = ""
+            display_date = date_str
     result = 1 if status_code == "4" or status_desc.lower() == "passed" else 0
     bill_motion = title or description or bill_number
     return {
@@ -352,7 +351,7 @@ def _build_sponsor_metadata(
         "roll_call_id": roll_call_id,
         "roll_details": roll_details,
         "roll_date": date_str,
-        "excel_date": excel_date,
+        "excel_date": display_date,
         "result": result,
         "chamber": chamber,
         "sponsorship_status": sponsorship_status,
@@ -399,10 +398,7 @@ def _create_sponsor_only_rows(
                 "Roll Call ID": normalized_roll_id,
                 "Person": legislator_name,
                 "Person Party": party_label,
-                "Vote": "No vote recorded",
-                "Vote Bucket": "Not",
                 "Date": meta.get("excel_date", ""),
-                "Result": meta.get("result", 0),
             }
         )
         rows.append(
@@ -953,11 +949,8 @@ def safe_int(value):
 
 def prepare_summary_dataframe(rows: List[List]) -> pd.DataFrame:
     summary_df = pd.DataFrame(rows, columns=WORKBOOK_HEADERS)
-    date_serials = pd.to_numeric(summary_df["Date"], errors="coerce")
-    summary_df["Date_dt"] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
-        date_serials, unit="D"
-    )
-    summary_df["Year"] = summary_df["Date_dt"].dt.year
+    summary_df["Date_dt"] = pd.to_datetime(summary_df["Date"], errors="coerce")
+    summary_df["Year"] = summary_df["Date_dt"].dt.year.astype("Int64")
     return summary_df
 
 
