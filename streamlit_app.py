@@ -719,7 +719,7 @@ def _compose_status_sentence(
     return f"{bill_ref} status information unavailable."
 
 
-def _prepare_sponsor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _prepare_sponsor_dataframe(df: pd.DataFrame, *, drop_date: bool = True) -> pd.DataFrame:
     working = df.copy()
     if "Bill Number" not in working.columns:
         return working
@@ -734,7 +734,8 @@ def _prepare_sponsor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     working = working.drop(columns=SPONSOR_DROP_COLUMNS, errors="ignore")
-    working = working.drop(columns=["Date_dt"], errors="ignore")
+    if drop_date:
+        working = working.drop(columns=["Date_dt"], errors="ignore")
     return working
 
 
@@ -1921,8 +1922,11 @@ if generate_summary_clicked and summary_df is not None:
         state_display_value = state_label
         if state_display_value == ALL_STATES_LABEL:
             state_display_value = dataset_state or state_code or ""
+        bullet_rows = filtered_df
+        if filter_mode == "Sponsored/Cosponsored Bills":
+            bullet_rows = _prepare_sponsor_dataframe(filtered_df, drop_date=False)
         bullet_doc_buffer = _build_bullet_summary_doc(
-            filtered_df,
+            bullet_rows,
             selected_legislator,
             filter_mode,
             bill_metadata,
