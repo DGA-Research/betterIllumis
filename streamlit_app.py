@@ -1027,6 +1027,12 @@ def _build_bullet_summary_doc(
     bill_metadata: Dict[Tuple[str, str], Dict[str, str]],
     state_label: str,
 ) -> io.BytesIO:
+    working_rows = rows.copy()
+    if "Date_dt" not in working_rows.columns or working_rows["Date_dt"].isna().any():
+        working_rows["Date_dt"] = pd.to_datetime(
+            working_rows.get("Date"), errors="coerce"
+        )
+
     doc = Document()
     doc.add_heading(f"{legislator_name} - {filter_label}", level=1)
 
@@ -1034,10 +1040,10 @@ def _build_bullet_summary_doc(
     if state_display == ALL_STATES_LABEL:
         state_display = 'State'
 
-    if rows.empty:
+    if working_rows.empty:
         doc.add_paragraph('No records available for this selection.')
     else:
-        for _, row in rows.iterrows():
+        for _, row in working_rows.iterrows():
             session_id = str(row.get('Session') or '').strip()
             bill_number = str(row.get('Bill Number') or '').strip()
             meta = bill_metadata.get((session_id, bill_number), {})
