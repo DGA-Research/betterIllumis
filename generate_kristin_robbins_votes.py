@@ -25,6 +25,10 @@ WORKBOOK_HEADERS = [
     "Bill Title",
     "Bill Description",
     "Roll Details",
+    "Committee ID",
+    "Committee",
+    "Last Action Date",
+    "Last Action",
     "Roll Call ID",
     "Person",
     "Person Party",
@@ -316,6 +320,11 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
             roll_suffix = f" ({yea}-Y {nay}-N)"
             roll_desc = f"{roll_desc_raw} {roll_suffix}".strip() if roll_desc_raw else roll_suffix
 
+            committee_id = str(roll.get("committee_id") or "").strip()
+            committee_name = (roll.get("committee") or "").strip()
+            last_action_date = (bill.get("last_action_date") or "").strip()
+            last_action = (bill.get("last_action") or "").strip()
+
             party_counts = counts.get(rcid, {})
 
             def bucket_value(party_label: str, bucket: str) -> int:
@@ -330,6 +339,10 @@ def collect_vote_rows(base_dirs: BaseDirsInput, target_name: str) -> List[List]:
                 bill_title,
                 bill_desc,
                 roll_desc,
+                committee_id,
+                committee_name,
+                last_action_date,
+                last_action,
                 rcid,
                 target_name,
                 target_party,
