@@ -96,6 +96,11 @@ FOCUS_PARTY_LOOKUP = {
     "Independent": "Other",
 }
 SPONSOR_DROP_COLUMNS = [
+    "Roll Details",
+    "Roll Call ID",
+    "Vote",
+    "Vote Bucket",
+    "Result",
     "Democrat_For",
     "Democrat_Against",
     "Democrat_Absent",
@@ -1048,6 +1053,7 @@ def _build_bullet_summary_doc(
 
             bill_motion = (row.get('Bill Motion') or '').strip()
             bill_description = (row.get('Bill Description') or '').strip()
+            bill_title = (row.get('Bill Title') or meta.get('title') or '').strip()
 
             primary_reference = bill_number or bill_motion or 'the bill'
             if bill_motion and not bill_number:
@@ -1073,6 +1079,11 @@ def _build_bullet_summary_doc(
             if not description_clean:
                 description_clean = 'No description provided'
 
+            title_fragment = ""
+            compare_description = bill_description
+            if bill_title and bill_title.lower() != compare_description.lower():
+                title_fragment = f", {bill_title}"
+
             status_sentence = _compose_status_sentence(
                 status_code,
                 primary_reference,
@@ -1084,14 +1095,41 @@ def _build_bullet_summary_doc(
             vote_url = (row.get('URL') or '').strip()
 
             paragraph = doc.add_paragraph(style='List Bullet')
-            first_sentence = f"{first_sentence_prefix}: {legislator_name} {vote_upper} {primary_reference}."
-            bold_run = paragraph.add_run(first_sentence + ' ')
+            sponsorship_status = (row.get("Sponsorship Status") or row.get("Sponsorship") or "").strip()
+            if filter_label == "Sponsored/Cosponsored Bills":
+                normalized_status = sponsorship_status.lower()
+                sponsor_upper = (
+                    "SPONSORED"
+                    if "primary" in normalized_status or not normalized_status
+                    else "COSPONSORED"
+                )
+                sponsor_lower = sponsor_upper.lower()
+                sponsor_reference = bill_number or primary_reference
+                first_sentence = (
+                    f"{first_sentence_prefix}: {legislator_name} "
+                    f"{sponsor_upper} {sponsor_reference}{title_fragment}."
+                )
+                bold_run = paragraph.add_run(first_sentence + ' ')
+                bold_run.bold = True
+                second_sentence = (
+                    f"{second_sentence_prefix}, {legislator_name} "
+                    f"{sponsor_lower} {sponsor_reference}, "
+                    f"\"{description_clean}.\""
+                )
+            else:
+                first_sentence = (
+                    f"{first_sentence_prefix}: {legislator_name} {vote_upper} "
+                    f"{primary_reference}{title_fragment}."
+                )
+                bold_run = paragraph.add_run(first_sentence + ' ')
+                bold_run.bold = True
+                second_sentence = (
+                    f"{second_sentence_prefix}, {legislator_name} {vote_lower} {primary_reference}: "
+                    f"\"{description_clean}.\""
+                )
+
             bold_run.bold = True
 
-            second_sentence = (
-                f"{second_sentence_prefix}, {legislator_name} {vote_lower} {primary_reference}: "
-                f"\"{description_clean}.\""
-            )
             paragraph.add_run(second_sentence + ' ')
             paragraph.add_run(status_sentence + ' ')
 
